@@ -1,0 +1,16 @@
+[package]
+name = "dm-integration-test"
+version = "0.1.0"
+edition = "2021"
+description = "Integration tests against live DM instance"
+
+[[bin]]
+name = "dm-integration-test"
+path = "src/main.rs"
+
+[dependencies]
+dameng-protocol = { path = "../dameng-protocol" }
+dameng-types = { path = "../dameng-types" }
+dameng = { path = "../dameng" }
+tokio-dameng = { path = "../tokio-dameng" }
+tokio = { version = "1", features = ["full"] }

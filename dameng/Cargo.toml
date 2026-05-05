@@ -1,0 +1,11 @@
+[package]
+name = "dameng"
+version = "0.1.0"
+edition = "2021"
+description = "Dameng database sync driver"
+license = "MIT"
+
+[dependencies]
+dameng-protocol = { path = "../dameng-protocol" }
+dameng-types = { path = "../dameng-types" }
+bytes = "1"
