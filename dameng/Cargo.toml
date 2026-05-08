@@ -9,3 +9,7 @@ license = "MIT"
 dameng-protocol = { path = "../dameng-protocol" }
 dameng-types = { path = "../dameng-types" }
 bytes = "1"
+
+[dev-dependencies]
+tokio-dameng = { path = "../tokio-dameng" }
+tokio = { version = "1", features = ["full"] }

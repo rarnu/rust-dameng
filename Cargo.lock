@@ -158,6 +158,8 @@ dependencies = [
  "bytes",
  "dameng-protocol",
  "dameng-types",
+ "tokio",
+ "tokio-dameng",
 ]
 
 [[package]]
