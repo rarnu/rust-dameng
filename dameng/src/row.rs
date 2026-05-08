@@ -1,69 +1,49 @@
 //! Row representation for query results.
+//!
+//! Re-exports unified Column/Row from dameng-protocol with ResultSet wrapper.
 
-use dameng_types::{DmValue, DmValueType};
+pub use dameng_protocol::{Column, Row};
 
-/// Column metadata from a query result.
+use dameng_types::DmValue;
+
+/// A query result set containing columns and rows.
 #[derive(Debug, Clone)]
-pub struct Column {
-    pub name: String,
-    pub type_code: i32,
-    pub type_name: String,
-    pub precision: u32,
-    pub scale: i16,
-    pub nullable: bool,
-}
-
-/// A single row of data from a query result.
-#[derive(Debug, Clone)]
-pub struct Row {
+pub struct ResultSet {
+    /// Column metadata shared across all rows.
     pub columns: Vec<Column>,
-    pub values: Vec<Option<Vec<u8>>>,
+    /// Row data.
+    pub rows: Vec<Row>,
 }
 
-impl Row {
-    /// Get the number of columns in this row.
-    pub fn len(&self) -> usize {
-        self.columns.len()
+impl ResultSet {
+    /// Create a new empty result set.
+    pub fn new() -> Self {
+        Self { columns: vec![], rows: vec![] }
     }
 
-    /// Check if the row has no columns.
+    /// Check if the result set is empty.
     pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
+        self.rows.is_empty()
     }
 
-    /// Get a value by column index as a decoded DmValue.
-    pub fn get(&self, idx: usize) -> Option<DmValue> {
-        let data = self.values.get(idx)?.as_ref()?;
-        if data.is_empty() {
-            return Some(DmValue::Null);
-        }
-        let ty = self.columns.get(idx)?.type_code;
-        let dm_ty = DmValueType::from_type_code(ty)?;
-        dameng_types::decode_value(dm_ty, data)
+    /// Get the number of rows.
+    pub fn len(&self) -> usize {
+        self.rows.len()
     }
 
-    /// Get an i32 value at the given column index.
-    pub fn get_i32(&self, idx: usize) -> Option<i32> {
-        match self.get(idx) {
-            Some(DmValue::Int(v)) => Some(v),
-            _ => None,
-        }
+    /// Get the first row, if any.
+    pub fn first(&self) -> Option<&Row> {
+        self.rows.first()
     }
 
-    /// Get a String value at the given column index.
-    pub fn get_str(&self, idx: usize) -> Option<String> {
-        match self.get(idx) {
-            Some(DmValue::Text(v)) => Some(v),
-            _ => None,
-        }
+    /// Iterate over rows.
+    pub fn iter(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter()
     }
 
-    /// Get an i64 value at the given column index.
-    pub fn get_i64(&self, idx: usize) -> Option<i64> {
-        match self.get(idx) {
-            Some(DmValue::BigInt(v)) => Some(v),
-            _ => None,
-        }
+    /// Get column metadata by name.
+    pub fn column_by_name(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
     }
 }
 
@@ -73,83 +53,67 @@ mod tests {
 
     #[test]
     fn test_row_empty() {
-        let row = Row { columns: vec![], values: vec![] };
+        let row = Row {
+            row_id: 0,
+            values: vec![],
+        };
         assert!(row.is_empty());
         assert_eq!(row.len(), 0);
     }
 
     #[test]
-    fn test_row_with_data() {
-        let row = Row {
-            columns: vec![Column {
-                name: "ID".to_string(),
-                type_code: 4, // INT
-                type_name: "INT".to_string(),
-                precision: 0,
-                scale: 0,
-                nullable: false,
-            }],
-            values: vec![Some(vec![42, 0, 0, 0])],
-        };
-        assert_eq!(row.len(), 1);
-        assert!(!row.is_empty());
+    fn test_result_set_empty() {
+        let rs = ResultSet::new();
+        assert!(rs.is_empty());
+        assert_eq!(rs.len(), 0);
     }
 
     #[test]
     fn test_row_get_i32() {
         let row = Row {
-            columns: vec![Column {
-                name: "ID".to_string(),
-                type_code: 4,
-                type_name: "INT".to_string(),
-                precision: 0,
-                scale: 0,
-                nullable: false,
-            }],
+            row_id: 0,
             values: vec![Some(vec![100, 0, 0, 0])],
         };
-        assert_eq!(row.get_i32(0), Some(100));
+        assert_eq!(row.get_i32(0).unwrap(), 100);
     }
 
     #[test]
     fn test_row_get_str() {
         let row = Row {
-            columns: vec![Column {
-                name: "NAME".to_string(),
-                type_code: 3,
-                type_name: "VARCHAR".to_string(),
-                precision: 0,
-                scale: 0,
-                nullable: true,
-            }],
+            row_id: 0,
             values: vec![Some(b"Alice".to_vec())],
         };
-        assert_eq!(row.get_str(0), Some("Alice".to_string()));
+        assert_eq!(row.get_str(0).unwrap(), "Alice");
     }
 
     #[test]
-    fn test_row_get_null() {
+    fn test_row_get_dmvlaue() {
+        let columns = vec![Column {
+            name: "ID".to_string(),
+            type_code: 4,
+            type_name: "INT".to_string(),
+            precision: 0,
+            scale: 0,
+            nullable: false,
+            display_size: 0,
+            table_name: "".to_string(),
+            schema_name: "".to_string(),
+        }];
         let row = Row {
-            columns: vec![Column {
-                name: "ID".to_string(),
-                type_code: 4,
-                type_name: "INT".to_string(),
-                precision: 0,
-                scale: 0,
-                nullable: true,
-            }],
-            values: vec![Some(vec![])],
+            row_id: 0,
+            values: vec![Some(vec![100, 0, 0, 0])],
         };
-        match row.get(0) {
-            Some(DmValue::Null) => {}
-            other => panic!("Expected Null, got {:?}", other),
-        }
+        let val = row.get(0, &columns).unwrap();
+        assert_eq!(val, DmValue::Int(100));
     }
 
     #[test]
     fn test_row_get_out_of_range() {
-        let row = Row { columns: vec![], values: vec![] };
-        assert_eq!(row.get_i32(0), None);
-        assert_eq!(row.get_str(0), None);
+        let row = Row {
+            row_id: 0,
+            values: vec![],
+        };
+        assert!(row.get_i32(0).is_err());
+        assert!(row.get_str(0).is_err());
     }
 }

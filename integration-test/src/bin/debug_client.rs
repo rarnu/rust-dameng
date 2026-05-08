@@ -19,7 +19,7 @@ fn main() {
             println!("OK: Got {} row(s)", rows.len());
             for (i, row) in rows.iter().enumerate() {
                 println!("  Row {}: values={:?}", i, row.values);
-                if let Some(val) = row.get_i32(0) {
+                if let Ok(val) = row.get_i32(0) {
                     println!("    col 0 (i32) = {}", val);
                 }
             }

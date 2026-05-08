@@ -4,23 +4,23 @@
 //! Used for both EXEC (type 5) and OPTIMIZED_PREPARE_EXEC (type 91) responses.
 //!
 //! === FIXED HEADER (16 bytes) ===
-//!   0  u32  sub_type (usually 7)
+//!   0  u32  sub_type (2 for V$VERSION, 7 for SELECT, etc.)
 //!   4  u32  flags (usually 4)
 //!   8  u32  reserved (0)
 //!  12  u32  row_count_in_response
 //!
 //! === FIRST COLUMN HEADER (16 bytes, offset 16) ===
-//!  16  u32  col_type (type code for first column; 0 if placeholder for multi-col)
+//!  16  u32  col_type (type code for first column)
 //!  20  u16  nullable
-//!  22  u16  display
-//!  24  u16  col_count (total number of columns)
+//!  22  u16  col_count (total number of columns)
+//!  24  u16  col_name_len (length of first column name)
 //!  26  u16  type_name_len
 //!  28  u16  table_name_len
 //!  30  u16  schema_name_len
 //!
 //! === COLUMN VARIABLE DATA ===
-//! First column strings (col_name is implicit — remaining bytes before type_name):
-//!   col_name (implicit length)
+//! First column strings (explicit lengths from header fields):
+//!   col_name (col_name_len bytes)
 //!   type_name (type_name_len bytes)
 //!   table_name (table_name_len bytes, if > 0)
 //!   schema_name (schema_name_len bytes, if > 0)
@@ -44,6 +44,7 @@
 //!   For each column: u16 value_size + value_size bytes of data
 
 use crate::error::Result;
+use dameng_types::{DmValue, DmValueType};
 
 /// Column metadata from a query result.
 #[derive(Debug, Clone)]
@@ -157,6 +158,18 @@ impl Row {
     /// Check if the row has no columns.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
+    }
+
+    /// Get a decoded DmValue at the given column index.
+    /// Uses the column type_code to decode the raw bytes.
+    pub fn get(&self, idx: usize, columns: &[Column]) -> Option<DmValue> {
+        let data = self.values.get(idx)?.as_ref()?;
+        if data.is_empty() {
+            return Some(DmValue::Null);
+        }
+        let col = columns.get(idx)?;
+        let dm_ty = DmValueType::from_type_code(col.type_code)?;
+        dameng_types::decode_value(dm_ty, data)
     }
 }
 
@@ -333,12 +346,15 @@ impl ExecResponse {
         //   sub_type=7: full format (SELECT style) - row_size(1)+flags(1)+rec_id(4)+padding(4)+col_offsets+values
         let mut rows = Vec::new();
         if sub_type == 2 {
-            // Compact row format: scan for marker 0x0C to find each row
-            while offset < data.len() {
+            // Compact row format (V$VERSION style):
+            // Each row: marker(0x0C) + flags(1) + val_size(2) + value(N) + padding
+            // Before the first row there may be padding/reserved bytes.
+            // Skip padding by scanning for the first 0x0C marker.
+            while offset + 4 <= data.len() && data[offset] != 0x0C {
+                offset += 1;
+            }
+            while offset + 4 <= data.len() && data[offset] == 0x0C {
                 let row_start = offset;
-                let marker = data[offset];
-                if marker == 0 { break; }
-                if offset + 4 > data.len() { break; }
                 let _flags = data[offset + 1];
                 let val_size = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
                 if val_size == 0 || offset + 4 + val_size > data.len() { break; }

@@ -165,6 +165,7 @@ name = "dameng-protocol"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "dameng-types",
 ]
 
 [[package]]

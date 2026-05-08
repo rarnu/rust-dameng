@@ -1,61 +1,45 @@
 //! Row representation for tokio-dameng query results.
+//!
+//! Re-exports the unified Column/Row types from dameng-protocol,
+//! adding convenience wrappers for the async client.
 
-use dameng_types::{DmValue, DmValueType};
+pub use dameng_protocol::{Column, Row};
 
+use dameng_types::DmValue;
+
+/// A query result set containing columns and rows.
 #[derive(Debug, Clone)]
-pub struct Column {
-    pub name: String,
-    pub type_code: i32,
-    pub type_name: String,
-    pub precision: u32,
-    pub scale: i16,
-    pub nullable: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct Row {
+pub struct ResultSet {
+    /// Column metadata shared across all rows.
     pub columns: Vec<Column>,
-    pub values: Vec<Option<Vec<u8>>>,
+    /// Row data.
+    pub rows: Vec<Row>,
 }
 
-impl Row {
-    pub fn len(&self) -> usize {
-        self.columns.len()
+impl ResultSet {
+    /// Create a new empty result set.
+    pub fn new() -> Self {
+        Self { columns: vec![], rows: vec![] }
     }
 
+    /// Check if the result set is empty.
     pub fn is_empty(&self) -> bool {
-        self.columns.is_empty()
+        self.rows.is_empty()
     }
 
-    pub fn get(&self, idx: usize) -> Option<DmValue> {
-        let data = self.values.get(idx)?.as_ref()?;
-        if data.is_empty() {
-            return Some(DmValue::Null);
-        }
-        let ty = self.columns.get(idx)?.type_code;
-        let dm_ty = DmValueType::from_type_code(ty)?;
-        dameng_types::decode_value(dm_ty, data)
+    /// Get the number of rows.
+    pub fn len(&self) -> usize {
+        self.rows.len()
     }
 
-    pub fn get_i32(&self, idx: usize) -> Option<i32> {
-        match self.get(idx) {
-            Some(DmValue::Int(v)) => Some(v),
-            _ => None,
-        }
+    /// Get the first row, if any.
+    pub fn first(&self) -> Option<&Row> {
+        self.rows.first()
     }
 
-    pub fn get_str(&self, idx: usize) -> Option<String> {
-        match self.get(idx) {
-            Some(DmValue::Text(v)) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn get_i64(&self, idx: usize) -> Option<i64> {
-        match self.get(idx) {
-            Some(DmValue::BigInt(v)) => Some(v),
-            _ => None,
-        }
+    /// Get column metadata by name.
+    pub fn column_by_name(&self, name: &str) -> Option<&Column> {
+        self.columns.iter().find(|c| c.name == name)
     }
 }
 
@@ -64,41 +48,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_row_empty() {
-        let row = Row { columns: vec![], values: vec![] };
-        assert!(row.is_empty());
-        assert_eq!(row.len(), 0);
+    fn test_result_set_empty() {
+        let rs = ResultSet::new();
+        assert!(rs.is_empty());
+        assert_eq!(rs.len(), 0);
     }
 
     #[test]
-    fn test_row_get_i32() {
+    fn test_result_set_column_by_name() {
+        let rs = ResultSet {
+            columns: vec![
+                Column {
+                    name: "ID".to_string(),
+                    type_code: 4,
+                    type_name: "INT".to_string(),
+                    precision: 0,
+                    scale: 0,
+                    nullable: false,
+                    display_size: 0,
+                    table_name: "".to_string(),
+                    schema_name: "".to_string(),
+                },
+                Column {
+                    name: "NAME".to_string(),
+                    type_code: 3,
+                    type_name: "VARCHAR".to_string(),
+                    precision: 0,
+                    scale: 0,
+                    nullable: true,
+                    display_size: 0,
+                    table_name: "".to_string(),
+                    schema_name: "".to_string(),
+                },
+            ],
+            rows: vec![],
+        };
+        assert!(rs.column_by_name("ID").is_some());
+        assert!(rs.column_by_name("NAME").is_some());
+        assert!(rs.column_by_name("UNKNOWN").is_none());
+    }
+
+    #[test]
+    fn test_row_get_i32_via_protocol() {
         let row = Row {
-            columns: vec![Column {
-                name: "ID".to_string(),
-                type_code: 4,
-                type_name: "INT".to_string(),
-                precision: 0,
-                scale: 0,
-                nullable: false,
-            }],
+            row_id: 0,
             values: vec![Some(vec![42, 0, 0, 0])],
         };
-        assert_eq!(row.get_i32(0), Some(42));
+        assert_eq!(row.get_i32(0).unwrap(), 42);
     }
 
     #[test]
-    fn test_row_get_str() {
+    fn test_row_get_str_via_protocol() {
         let row = Row {
-            columns: vec![Column {
-                name: "NAME".to_string(),
-                type_code: 3,
-                type_name: "VARCHAR".to_string(),
-                precision: 0,
-                scale: 0,
-                nullable: true,
-            }],
+            row_id: 0,
             values: vec![Some(b"Test".to_vec())],
         };
-        assert_eq!(row.get_str(0), Some("Test".to_string()));
+        assert_eq!(row.get_str(0).unwrap(), "Test");
+    }
+
+    #[test]
+    fn test_row_get_dmvalue() {
+        let columns = vec![Column {
+            name: "ID".to_string(),
+            type_code: 4,
+            type_name: "INT".to_string(),
+            precision: 0,
+            scale: 0,
+            nullable: false,
+            display_size: 0,
+            table_name: "".to_string(),
+            schema_name: "".to_string(),
+        }];
+        let row = Row {
+            row_id: 0,
+            values: vec![Some(vec![42, 0, 0, 0])],
+        };
+        let val = row.get(0, &columns).unwrap();
+        assert_eq!(val, DmValue::Int(42));
     }
 }

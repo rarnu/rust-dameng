@@ -5,8 +5,11 @@
 
 pub mod client;
 pub mod error;
+pub mod query;
 pub mod row;
 
 pub use client::Client;
 pub use error::{Error, Result};
-pub use row::Row;
+pub use query::{QueryBuilderExt, Query, RowExt};
+pub use row::ResultSet;
+pub use dameng_protocol::{Column, Row};

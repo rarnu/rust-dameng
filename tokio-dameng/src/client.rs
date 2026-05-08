@@ -7,7 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::error::{Error, Result};
-use crate::row::{Column, Row};
+use crate::row::ResultSet;
+use dameng_protocol::{Column, Row};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
@@ -175,7 +176,7 @@ impl Client {
         stmt_id: u32,
         sql: &str,
         params: &[BindParam],
-    ) -> Result<Vec<Row>> {
+    ) -> Result<ResultSet> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
@@ -204,7 +205,7 @@ impl Client {
     }
 
     /// Execute a SQL statement and return result rows.
-    pub async fn execute(&mut self, sql: &str) -> Result<Vec<Row>> {
+    pub async fn execute(&mut self, sql: &str) -> Result<ResultSet> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
@@ -221,7 +222,7 @@ impl Client {
         self.read_exec_response().await
     }
 
-    async fn read_exec_response(&mut self) -> Result<Vec<Row>> {
+    async fn read_exec_response(&mut self) -> Result<ResultSet> {
         let (frame, payload) = self.read_message().await?;
 
         // Check for error response first
@@ -245,35 +246,17 @@ impl Client {
             return Err(Error::QueryFailed(error_detail));
         }
 
-        // Helper to convert ExecResponse into Vec<Row>
-        let parse_rows = |payload: &[u8]| -> Result<Vec<Row>> {
+        // Helper to convert ExecResponse into ResultSet
+        let parse_rows = |payload: &[u8]| -> Result<ResultSet> {
             let resp = ExecResponse::from_bytes(payload)?;
-            let mut rows = Vec::new();
-            for row_data in resp.rows {
-                let columns: Vec<Column> = resp
-                    .columns
-                    .iter()
-                    .map(|c| Column {
-                        name: c.name.clone(),
-                        type_code: c.type_code,
-                        type_name: c.type_name.clone(),
-                        precision: c.precision,
-                        scale: c.scale,
-                        nullable: c.nullable,
-                    })
-                    .collect();
-                rows.push(Row {
-                    columns,
-                    values: row_data.values,
-                });
-            }
-            Ok(rows)
+            let rows: Vec<Row> = resp.rows;
+            Ok(ResultSet { columns: resp.columns, rows })
         };
 
         if frame.msg_type == ACK {
             // OPE (type 91) returns ACK with inline row data in payload
             if payload.is_empty() {
-                return Ok(vec![]);
+                return Ok(ResultSet::new());
             }
             return parse_rows(&payload);
         }

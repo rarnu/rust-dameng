@@ -8,7 +8,8 @@ use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
 
 use crate::error::{Error, Result};
-use crate::row::{Column, Row};
+use crate::row::ResultSet;
+use dameng_protocol::{Column, Row};
 
 /// Connection state.
 #[derive(Debug, Clone, PartialEq)]
@@ -193,7 +194,7 @@ impl Client {
         stmt_id: u32,
         sql: &str,
         params: &[BindParam],
-    ) -> Result<Vec<Row>> {
+    ) -> Result<ResultSet> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
@@ -222,7 +223,7 @@ impl Client {
     }
 
     /// Execute a SQL statement without parameters.
-    pub fn execute(&mut self, sql: &str) -> Result<Vec<Row>> {
+    pub fn execute(&mut self, sql: &str) -> Result<ResultSet> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
@@ -240,7 +241,7 @@ impl Client {
     }
 
     /// Read an EXEC_RESPONSE and parse into Rows.
-    fn read_exec_response(&mut self) -> Result<Vec<Row>> {
+    fn read_exec_response(&mut self) -> Result<ResultSet> {
         let (frame, payload) = self.read_message()?;
 
         // Check for error response (negative response_code)
@@ -264,52 +265,14 @@ impl Client {
         if frame.msg_type == ACK {
             // OPE (type 91) returns ACK with inline row data in payload
             if payload.is_empty() {
-                return Ok(vec![]);
+                return Ok(ResultSet::new());
             }
             let resp = ExecResponse::from_bytes(&payload)?;
-            let mut rows = Vec::new();
-            for row_data in resp.rows {
-                let columns: Vec<Column> = resp
-                    .columns
-                    .iter()
-                    .map(|c| Column {
-                        name: c.name.clone(),
-                        type_code: c.type_code,
-                        type_name: c.type_name.clone(),
-                        precision: c.precision,
-                        scale: c.scale,
-                        nullable: c.nullable,
-                    })
-                    .collect();
-                rows.push(Row {
-                    columns,
-                    values: row_data.values,
-                });
-            }
-            return Ok(rows);
+            return Ok(ResultSet { columns: resp.columns, rows: resp.rows });
         }
         if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
             let resp = ExecResponse::from_bytes(&payload)?;
-            let mut rows = Vec::new();
-            for row_data in resp.rows {
-                let columns: Vec<Column> = resp
-                    .columns
-                    .iter()
-                    .map(|c| Column {
-                        name: c.name.clone(),
-                        type_code: c.type_code,
-                        type_name: c.type_name.clone(),
-                        precision: c.precision,
-                        scale: c.scale,
-                        nullable: c.nullable,
-                    })
-                    .collect();
-                rows.push(Row {
-                    columns,
-                    values: row_data.values,
-                });
-            }
-            Ok(rows)
+            Ok(ResultSet { columns: resp.columns, rows: resp.rows })
         } else {
             Err(Error::ConnectionFailed(format!(
                 "unexpected response msg_type={}",
