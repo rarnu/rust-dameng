@@ -24,6 +24,9 @@ pub use transaction::*;
 pub use close::*;
 pub use response::*;
 
+// Re-export msg_type constants at top level for convenience
+pub use self::msg_type::*;
+
 use bytes::{BufMut, BytesMut};
 
 use crate::frame::Frame;
@@ -31,31 +34,44 @@ use crate::frame::Frame;
 /// Message type constants.
 pub mod msg_type {
     /// STARTUP - Initial connection handshake (client->server)
-    pub const STARTUP: u16 = 200;
+    pub const STARTUP: u8 = 200;
     /// STARTUP_RESPONSE - Server hello (server->client)
-    pub const STARTUP_RESPONSE: u16 = 228;
+    pub const STARTUP_RESPONSE: u8 = 228;
     /// LOGIN - Send credentials (client->server)
-    pub const LOGIN: u16 = 1;
+    pub const LOGIN: u8 = 1;
     /// LOGIN_RESPONSE - Authentication result (server->client)
-    pub const LOGIN_RESPONSE: u16 = 163;
-    /// READY - Send ready/keepalive (client->server)
-    pub const READY: u16 = 3;
+    pub const LOGIN_RESPONSE: u8 = 163;
+    /// STATEMENT_PREPARE - Allocate a statement handle (client->server).
+    /// Previously named READY; kept for backward compatibility.
+    pub const STATEMENT_PREPARE: u8 = 3;
+    /// READY - Alias for STATEMENT_PREPARE (type 3). Send ready/keepalive (client->server).
+    pub const READY: u8 = 3;
+    /// STATEMENT_FREE - Free a statement handle (client->server).
+    pub const STATEMENT_FREE: u8 = 4;
     /// ACK - Success/generic response (server->client)
-    pub const ACK: u16 = 187;
-    /// PREPARE/EXEC - Prepare statement or execute (client->server)
-    pub const EXEC: u16 = 5;
+    pub const ACK: u8 = 187;
+    /// PREPARE/EXEC - Prepare and execute statement (client->server)
+    pub const EXEC: u8 = 5;
     /// EXEC_RESPONSE - Statement result (server->client)
-    pub const EXEC_RESPONSE: u16 = 0;
-    /// BIND - Bind parameters and execute (client->server)
-    pub const BIND: u16 = 13;
-    /// FETCH - Fetch more rows (client->server)
-    pub const FETCH: u16 = 21;
+    pub const EXEC_RESPONSE: u8 = 0;
+    /// FETCH - Fetch more rows from result set (client->server)
+    pub const FETCH: u8 = 7;
     /// COMMIT - Commit transaction (client->server)
-    pub const COMMIT: u16 = 8;
+    pub const COMMIT: u8 = 8;
     /// ROLLBACK - Rollback transaction (client->server)
-    pub const ROLLBACK: u16 = 7;
+    pub const ROLLBACK: u8 = 9;
+    /// BIND - Bind parameters and execute (client->server)
+    pub const BIND: u8 = 13;
     /// CLOSE - Close statement (client->server)
-    pub const CLOSE: u16 = 20;
+    pub const CLOSE: u8 = 20;
+    /// STATEMENT_SET_CURSOR - Set cursor position for a statement (client->server)
+    pub const STATEMENT_SET_CURSOR: u8 = 27;
+    /// FETCH_RESULT_SET - Fetch an entire result set (client->server)
+    pub const FETCH_RESULT_SET: u8 = 44;
+    /// SET_ISOLATION - Set transaction isolation level (client->server)
+    pub const SET_ISOLATION: u8 = 52;
+    /// OPTIMIZED_PREPARE_EXEC - Optimized prepare-and-execute path (client->server)
+    pub const OPTIMIZED_PREPARE_EXEC: u8 = 91;
 }
 
 /// DM data type codes.
@@ -125,8 +141,8 @@ pub mod crypto {
 }
 
 /// Build a complete message (frame + payload) and return it as BytesMut.
-pub fn build_message(msg_type: u16, handle: u16, payload: &[u8]) -> BytesMut {
-    let frame = Frame::new(msg_type, handle, payload.len() as u16);
+pub fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> BytesMut {
+    let frame = Frame::new(msg_type, handle, payload.len() as i32);
     let mut result = frame.encode();
     result.put_slice(payload);
     result

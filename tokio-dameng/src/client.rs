@@ -22,8 +22,10 @@ pub struct Client {
     state: State,
     host: String,
     port: u16,
-    handle: u16,
+    handle: i32,
     challenge: Vec<u8>,
+    auto_commit: bool,
+    encoding: u8,
 }
 
 impl Client {
@@ -35,6 +37,8 @@ impl Client {
             port,
             handle: 0,
             challenge: vec![],
+            auto_commit: true,
+            encoding: 1,
         }
     }
 
@@ -60,35 +64,35 @@ impl Client {
     }
 
     async fn send_startup(&mut self) -> Result<()> {
-        let msg = StartupMessage::new(&[]);
+        let msg = StartupMessage::new();
         let payload = msg.encode_payload();
-        let frame_data = crate::build_message(msg_type::STARTUP, 0, &payload);
+        let frame_data = build_message(STARTUP, 0, &payload);
         self.write_all(&frame_data).await?;
         Ok(())
     }
 
     async fn read_startup_response(&mut self) -> Result<StartupResponse> {
         let (frame, payload) = self.read_message().await?;
-        if frame.msg_type != msg_type::STARTUP_RESPONSE {
+        if frame.msg_type != STARTUP_RESPONSE && frame.msg_type != ACK {
             return Err(Error::ConnectionFailed(format!(
-                "expected STARTUP_RESPONSE got msg_type={}",
+                "expected STARTUP_RESPONSE or ACK got msg_type={}",
                 frame.msg_type
             )));
         }
-        StartupResponse::from_bytes(&payload).map_err(|e| Error::Protocol(e))
+        StartupResponse::from_bytes(&payload, frame.response_code).map_err(|e| Error::Protocol(e))
     }
 
     async fn send_login(&mut self, username: &str, password: &str) -> Result<()> {
         let login = LoginMessage::new(username, password, &self.host);
         let payload = login.encode_payload(&self.challenge);
-        let frame_data = crate::build_message(msg_type::LOGIN, 0, &payload);
+        let frame_data = build_message(LOGIN, 0, &payload);
         self.write_all(&frame_data).await?;
         Ok(())
     }
 
     async fn read_login_response(&mut self) -> Result<LoginResponse> {
         let (frame, payload) = self.read_message().await?;
-        if frame.msg_type != msg_type::LOGIN_RESPONSE {
+        if frame.msg_type != LOGIN_RESPONSE {
             return Err(Error::ConnectionFailed(format!(
                 "expected LOGIN_RESPONSE got msg_type={}",
                 frame.msg_type
@@ -97,31 +101,153 @@ impl Client {
         LoginResponse::from_bytes(&payload).map_err(|e| Error::Protocol(e))
     }
 
+    /// Begin a new transaction by disabling auto-commit.
+    pub async fn begin(&mut self) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        self.auto_commit = false;
+        Ok(())
+    }
+
+    /// Allocate a new statement handle from the server.
+    pub async fn allocate_statement(&mut self) -> Result<u32> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let alloc = StatementAllocateMessage::new();
+        let payload = alloc.encode_payload();
+        self.write_all(&build_message(STATEMENT_PREPARE, 0, &payload)).await?;
+        let (frame, resp_payload) = self.read_message().await?;
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "allocate statement failed: code={}",
+                frame.response_code
+            )));
+        }
+        StatementAllocateMessage::parse_response(&resp_payload)
+            .map_err(|e| Error::Protocol(e))
+    }
+
+    /// Free a statement handle.
+    pub async fn free_statement(&mut self, stmt_id: u32) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let free = StatementFreeMessage::new(stmt_id);
+        let payload = free.encode_payload();
+        self.write_all(&build_message(STATEMENT_FREE, 0, &payload)).await?;
+        let (frame, _) = self.read_message().await?;
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "free statement {} failed: code={}",
+                stmt_id, frame.response_code
+            )));
+        }
+        Ok(())
+    }
+
+    /// Prepare a SQL statement on the server.
+    pub async fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode()).await?;
+        self.read_message().await?;
+
+        let exec = ExecMessage::new(sql, 0);
+        let exec_payload = exec.encode_payload();
+        self.write_all(&build_message(EXEC, stmt_id as i32, &exec_payload)).await?;
+        let (frame, _) = self.read_message().await?;
+        if frame.response_code < 0 {
+            return Err(Error::QueryFailed(format!(
+                "prepare failed: code={}",
+                frame.response_code
+            )));
+        }
+        Ok(())
+    }
+
+    /// Execute a SQL with bound parameters.
+    pub async fn execute_with_params(
+        &mut self,
+        stmt_id: u32,
+        sql: &str,
+        params: &[BindParam],
+    ) -> Result<Vec<Row>> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        let is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
+
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode()).await?;
+        self.read_message().await?;
+
+        if params.is_empty() {
+            let exec = ExecMessage::new(sql, 0);
+            let exec_payload = exec.encode_payload();
+            self.write_all(&build_message(
+                EXEC,
+                if stmt_id > 0 { stmt_id as i32 } else { 0 },
+                &exec_payload,
+            )).await?;
+            return self.read_exec_response().await;
+        }
+
+        let bind = BindExec2Message::new(self.auto_commit, is_select, params.to_vec());
+        let bind_payload = bind.encode_payload();
+        self.write_all(&build_message(BIND, stmt_id as i32, &bind_payload)).await?;
+        self.read_exec_response().await
+    }
+
     /// Execute a SQL statement and return result rows.
     pub async fn execute(&mut self, sql: &str) -> Result<Vec<Row>> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
 
-        let ready = ReadyMessage::new();
-        let ready_payload = ready.encode_payload();
-        self.write_all(&crate::build_message(msg_type::READY, self.handle, &ready_payload)).await?;
-        self.read_message().await?;
+        // Send READY with empty payload before EXEC (required by server)
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode()).await?;
+        self.read_message().await?; // consume ACK
 
+        // Send OPTIMIZED_PREPARE_EXEC (type 91) - returns inline row data
         let exec = ExecMessage::new(sql, 0);
         let exec_payload = exec.encode_payload();
-        self.handle += 1;
-        self.write_all(&crate::build_message(msg_type::EXEC, self.handle, &exec_payload)).await?;
+        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload)).await?;
         self.read_exec_response().await
     }
 
     async fn read_exec_response(&mut self) -> Result<Vec<Row>> {
         let (frame, payload) = self.read_message().await?;
-        if frame.msg_type == msg_type::ACK {
-            return Ok(vec![]);
+
+        // Check for error response first
+        if frame.response_code < 0 {
+            let mut error_detail = format!("response_code={}", frame.response_code);
+            if payload.len() > 12 {
+                let msg_len = u32::from_le_bytes([
+                    payload[12],
+                    payload.get(13).copied().unwrap_or(0),
+                    payload.get(14).copied().unwrap_or(0),
+                    payload.get(15).copied().unwrap_or(0),
+                ]) as usize;
+                if msg_len > 0 && payload.len() >= 16 + msg_len {
+                    error_detail = format!(
+                        "{}: {}",
+                        frame.response_code,
+                        String::from_utf8_lossy(&payload[16..16 + msg_len])
+                    );
+                }
+            }
+            return Err(Error::QueryFailed(error_detail));
         }
-        if frame.msg_type == msg_type::EXEC_RESPONSE {
-            let resp = ExecResponse::from_bytes(&payload)?;
+
+        // Helper to convert ExecResponse into Vec<Row>
+        let parse_rows = |payload: &[u8]| -> Result<Vec<Row>> {
+            let resp = ExecResponse::from_bytes(payload)?;
             let mut rows = Vec::new();
             for row_data in resp.rows {
                 let columns: Vec<Column> = resp
@@ -142,19 +268,29 @@ impl Client {
                 });
             }
             Ok(rows)
-        } else {
-            Err(Error::ConnectionFailed(format!(
-                "unexpected response msg_type={}",
-                frame.msg_type
-            )))
+        };
+
+        if frame.msg_type == ACK {
+            // OPE (type 91) returns ACK with inline row data in payload
+            if payload.is_empty() {
+                return Ok(vec![]);
+            }
+            return parse_rows(&payload);
         }
+        if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
+            return parse_rows(&payload);
+        }
+        Err(Error::ConnectionFailed(format!(
+            "unexpected response msg_type={}",
+            frame.msg_type
+        )))
     }
 
     /// Commit the current transaction.
     pub async fn commit(&mut self) -> Result<()> {
         let commit = CommitMessage;
         let payload = commit.encode_payload();
-        self.write_all(&crate::build_message(msg_type::COMMIT, self.handle, &payload)).await?;
+        self.write_all(&build_message(COMMIT, self.handle, &payload)).await?;
         self.read_message().await?;
         Ok(())
     }
@@ -163,7 +299,7 @@ impl Client {
     pub async fn rollback(&mut self) -> Result<()> {
         let rollback = RollbackMessage;
         let payload = rollback.encode_payload();
-        self.write_all(&crate::build_message(msg_type::ROLLBACK, self.handle, &payload)).await?;
+        self.write_all(&build_message(ROLLBACK, self.handle, &payload)).await?;
         self.read_message().await?;
         Ok(())
     }
@@ -186,7 +322,8 @@ impl Client {
 
         let frame = Frame::parse(&mut buf)?;
 
-        while buf.len() < FRAME_HEADER_SIZE + frame.payload_len as usize {
+        let body_len = frame.body_len.max(0) as usize;
+        while buf.len() < body_len {
             let mut tmp = vec![0u8; 1024];
             let n = stream.read(&mut tmp).await?;
             if n == 0 {
@@ -195,7 +332,7 @@ impl Client {
             buf.extend_from_slice(&tmp[..n]);
         }
 
-        let payload = buf[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + frame.payload_len as usize].to_vec();
+        let payload = buf[..body_len].to_vec();
         Ok((frame, payload))
     }
 
@@ -212,8 +349,8 @@ impl Drop for Client {
     }
 }
 
-pub(crate) fn build_message(msg_type: u16, handle: u16, payload: &[u8]) -> Vec<u8> {
-    let frame = Frame::new(msg_type, handle, payload.len() as u16);
+pub(crate) fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> Vec<u8> {
+    let frame = Frame::new(msg_type, handle, payload.len() as i32);
     let mut result = frame.encode().to_vec();
     result.extend_from_slice(payload);
     result
@@ -244,7 +381,7 @@ mod tests {
         let frame = Frame::parse(&mut buf).unwrap();
         assert_eq!(frame.msg_type, 200);
         assert_eq!(frame.handle, 0);
-        assert_eq!(frame.payload_len, 10);
+        assert_eq!(frame.body_len, 10);
     }
 
     #[tokio::test]

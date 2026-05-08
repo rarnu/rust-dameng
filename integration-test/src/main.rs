@@ -7,7 +7,7 @@ fn main() {
         .parse()
         .unwrap_or(5236);
     let username = env::var("DM_USER").unwrap_or_else(|_| "SYSDBA".to_string());
-    let password = env::var("DM_PASS").unwrap_or_else(|_| "".to_string());
+    let password = env::var("DM_PASS").unwrap_or_else(|_| "SYSDBA".to_string());
 
     println!("Testing Dameng sync driver against {}:{} ...", host, port);
     println!("User: {}", username);
@@ -43,7 +43,7 @@ fn main() {
 
     // Test 3: Query system version
     println!("\n=== Test 3: SELECT VERSION FROM V$VERSION ===");
-    match client.execute("SELECT VERSION FROM V$VERSION") {
+    match client.execute("SELECT * FROM V$VERSION") {
         Ok(rows) => {
             println!("OK: Got {} row(s)", rows.len());
             if let Some(row) = rows.first() {

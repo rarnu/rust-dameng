@@ -1,8 +1,47 @@
-//! EXEC_RESPONSE (type 0) - Statement execution results.
+//! EXEC_RESPONSE (type 0 / 187) - Statement execution results.
 //!
-//! Contains column metadata and row data returned after executing
-//! a SELECT statement or binding parameters.
-
+//! Format verified against DM 8.1.3.62 live traffic.
+//! Used for both EXEC (type 5) and OPTIMIZED_PREPARE_EXEC (type 91) responses.
+//!
+//! === FIXED HEADER (16 bytes) ===
+//!   0  u32  sub_type (usually 7)
+//!   4  u32  flags (usually 4)
+//!   8  u32  reserved (0)
+//!  12  u32  row_count_in_response
+//!
+//! === FIRST COLUMN HEADER (16 bytes, offset 16) ===
+//!  16  u32  col_type (type code for first column; 0 if placeholder for multi-col)
+//!  20  u16  nullable
+//!  22  u16  display
+//!  24  u16  col_count (total number of columns)
+//!  26  u16  type_name_len
+//!  28  u16  table_name_len
+//!  30  u16  schema_name_len
+//!
+//! === COLUMN VARIABLE DATA ===
+//! First column strings (col_name is implicit — remaining bytes before type_name):
+//!   col_name (implicit length)
+//!   type_name (type_name_len bytes)
+//!   table_name (table_name_len bytes, if > 0)
+//!   schema_name (schema_name_len bytes, if > 0)
+//!   null_terminator (1 byte, 0x00)
+//!
+//! For each subsequent column N (N > 1):
+//!   Between-columns metadata (12 bytes): nullable_flags(u32) + precision(u32) + reserved(u32)
+//!   Column N header (19 bytes):
+//!     col_type(u32) + nullable(u16) + display(u16) + reserved(u8) + col_index(u8)
+//!     + col_name_len(u16) + type_name_len(u16) + table_name_len(u16) + schema_name_len(u16) + padding(u8)
+//!   Column N strings:
+//!     padding(u8) + col_name + type_name + table_name + schema_name + terminator(u8)
+//!
+//! === OPE INLINE ROW DATA (for OPTIMIZED_PREPARE_EXEC type 91) ===
+//! After all column metadata, rows are embedded inline:
+//!   u8  row_size_marker (total bytes for this row including marker)
+//!   u8  flags
+//!   u32 rec_id
+//!   u32 padding (0)
+//!   For each column: u16 col_offset_from_marker
+//!   For each column: u16 value_size + value_size bytes of data
 
 use crate::error::Result;
 
@@ -33,19 +72,28 @@ pub struct Column {
 #[derive(Debug, Clone)]
 pub struct Row {
     /// Row ID from the database.
-    pub row_id: i64,
+    pub row_id: u16,
     /// Column values as raw bytes.
     pub values: Vec<Option<Vec<u8>>>,
 }
 
-/// Implementation helper for parsing row values into typed Rust values.
 impl Row {
     /// Get an i32 value at the given column index.
     pub fn get_i32(&self, idx: usize) -> Result<i32> {
         let val = self.values.get(idx).and_then(|v| v.as_ref())
-            .ok_or(crate::error::Error::DecodeError(format!("column {} is NULL or out of range", idx)))?;
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
         if val.len() < 4 {
-            return Err(crate::error::Error::DecodeError(format!("column {} too short for i32", idx)));
+            if val.len() == 1 {
+                return Ok(val[0] as i32);
+            }
+            if val.len() == 2 {
+                return Ok(i32::from(i16::from_le_bytes([val[0], val[1]])));
+            }
+            return Err(crate::error::Error::DecodeError(format!(
+                "column {} too short for i32 ({} bytes)", idx, val.len()
+            )));
         }
         Ok(i32::from_le_bytes([val[0], val[1], val[2], val[3]]))
     }
@@ -53,17 +101,26 @@ impl Row {
     /// Get an i64 value at the given column index.
     pub fn get_i64(&self, idx: usize) -> Result<i64> {
         let val = self.values.get(idx).and_then(|v| v.as_ref())
-            .ok_or(crate::error::Error::DecodeError(format!("column {} is NULL or out of range", idx)))?;
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
         if val.len() < 8 {
-            return Err(crate::error::Error::DecodeError(format!("column {} too short for i64", idx)));
+            if val.len() >= 4 {
+                return Ok(i64::from(i32::from_le_bytes([val[0], val[1], val[2], val[3]])));
+            }
+            return Err(crate::error::Error::DecodeError(format!(
+                "column {} too short for i64", idx
+            )));
         }
         Ok(i64::from_le_bytes([val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7]]))
-        }
+    }
 
     /// Get a String value at the given column index.
     pub fn get_str(&self, idx: usize) -> Result<String> {
         let val = self.values.get(idx).and_then(|v| v.as_ref())
-            .ok_or(crate::error::Error::DecodeError(format!("column {} is NULL or out of range", idx)))?;
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
         String::from_utf8(val.clone())
             .map_err(|e| crate::error::Error::DecodeError(e.to_string()))
     }
@@ -71,9 +128,13 @@ impl Row {
     /// Get a f64 value at the given column index.
     pub fn get_f64(&self, idx: usize) -> Result<f64> {
         let val = self.values.get(idx).and_then(|v| v.as_ref())
-            .ok_or(crate::error::Error::DecodeError(format!("column {} is NULL or out of range", idx)))?;
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
         if val.len() < 8 {
-            return Err(crate::error::Error::DecodeError(format!("column {} too short for f64", idx)));
+            return Err(crate::error::Error::DecodeError(format!(
+                "column {} too short for f64", idx
+            )));
         }
         let bytes: [u8; 8] = val[..8].try_into().unwrap();
         Ok(f64::from_le_bytes(bytes))
@@ -100,9 +161,6 @@ impl Row {
 }
 
 /// Server->Client EXEC_RESPONSE (type 0).
-///
-/// Contains the result of executing a statement: column metadata,
-/// row data, and execution statistics.
 #[derive(Debug, Clone)]
 pub struct ExecResponse {
     /// Number of columns in the result.
@@ -111,196 +169,248 @@ pub struct ExecResponse {
     pub row_count: u32,
     /// Column metadata.
     pub columns: Vec<Column>,
-    /// Row data.
+    /// Row data (column-major order).
     pub rows: Vec<Row>,
 }
 
 impl ExecResponse {
     /// Parse from raw payload bytes.
     ///
-    /// This is the most complex parser - it handles variable-length
-    /// column metadata followed by variable-length row data.
+    /// Supports both EXEC (type 5) metadata-only responses and
+    /// OPTIMIZED_PREPARE_EXEC (type 91) responses with inline row data.
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        if data.len() < 34 {
+        if data.len() < 16 {
             return Err(crate::error::Error::Incomplete);
         }
 
-        let _flags = u16::from_le_bytes([data[0], data[1]]);
-        let _reserved = u16::from_le_bytes([data[2], data[3]]);
-        let _rows_affected = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        let _param_count = u16::from_le_bytes([data[8], data[9]]);
-        let _reserved = u16::from_le_bytes([data[10], data[11]]);
-        let _stmt_handle = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
-        let col_count = u16::from_le_bytes([data[16], data[17]]);
-        let _reserved = u16::from_le_bytes([data[18], data[19]]);
-        let _reserved = u32::from_le_bytes([data[20], data[21], data[22], data[23]]);
+        // === Fixed Header (16 bytes) ===
+        let sub_type = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let _flags = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+        let _reserved = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        let header_row_count = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
 
-        // Parse column metadata starting at offset 24
+        // === First Column Header (16 bytes, offset 16) ===
+        let first_col_type = i32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+        let first_nullable = u16::from_le_bytes([data[20], data[21]]);
+        let col_count = u16::from_le_bytes([data[22], data[23]]);
+        let col_name_len = u16::from_le_bytes([data[24], data[25]]) as usize;
+        let type_name_len = u16::from_le_bytes([data[26], data[27]]) as usize;
+        let table_name_len = u16::from_le_bytes([data[28], data[29]]) as usize;
+        let schema_name_len = u16::from_le_bytes([data[30], data[31]]) as usize;
+
         let mut columns = Vec::with_capacity(col_count as usize);
-        let mut offset = 24;
+        let mut offset = 32; // Column variable data starts at 32
 
-        for _ in 0..col_count {
-            if offset + 12 > data.len() {
-                break;
-            }
-
-            // Column info header
-            let _col_flag = u8::from_le_bytes([data[offset]]);
-            offset += 1;
-
-            let col_name_len = u8::from_le_bytes([data[offset]]) as usize;
-            offset += 1;
-
-            let type_name_len = u8::from_le_bytes([data[offset]]) as usize;
-            offset += 1;
-
-            let _nullable = data[offset];
-            offset += 1;
-
-            // Column name
-            if offset + col_name_len > data.len() {
-                break;
-            }
-            let col_name = String::from_utf8_lossy(&data[offset..offset + col_name_len]).to_string();
+        if col_count > 0 {
+            // col_name (explicit length from col_name_len field at offset 24-25)
+            let col_name = if col_name_len > 0 && offset + col_name_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + col_name_len]).to_string()
+            } else {
+                String::new()
+            };
             offset += col_name_len;
 
-            // Type name
-            if offset + type_name_len > data.len() {
-                break;
-            }
-            let type_name = String::from_utf8_lossy(&data[offset..offset + type_name_len]).to_string();
+            // type_name
+            let type_name = if type_name_len > 0 && offset + type_name_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + type_name_len]).to_string()
+            } else {
+                String::new()
+            };
             offset += type_name_len;
 
-            // Table name
-            let table_name_len = if offset < data.len() { u8::from_le_bytes([data[offset]]) as usize } else { 0 };
-            offset += 1;
-            let table_name = if offset + table_name_len <= data.len() {
-                let name = String::from_utf8_lossy(&data[offset..offset + table_name_len]).to_string();
-                offset += table_name_len;
-                name
+            // table_name
+            let table_name = if table_name_len > 0 && offset + table_name_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + table_name_len]).to_string()
             } else {
                 String::new()
             };
+            offset += table_name_len;
 
-            // Schema name
-            let schema_name_len = if offset < data.len() { u8::from_le_bytes([data[offset]]) as usize } else { 0 };
-            offset += 1;
-            let schema_name = if offset + schema_name_len <= data.len() {
-                let name = String::from_utf8_lossy(&data[offset..offset + schema_name_len]).to_string();
-                offset += schema_name_len;
-                name
+            // schema_name
+            let schema_name = if schema_name_len > 0 && offset + schema_name_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + schema_name_len]).to_string()
             } else {
                 String::new()
             };
+            offset += schema_name_len;
 
-            // Internal column name (short name)
-            let _short_name_len = if offset < data.len() { u8::from_le_bytes([data[offset]]) as usize } else { 0 };
-            offset += 1;
-            if offset + _short_name_len <= data.len() {
-                offset += _short_name_len;
+            // Skip null terminator
+            if offset < data.len() && data[offset] == 0 {
+                offset += 1;
             }
-
-            // Type code, precision, scale, display size
-            let type_code = if offset + 4 <= data.len() {
-                let code = i32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
-                offset += 4;
-                code
-            } else {
-                0
-            };
-
-            let precision = if offset + 4 <= data.len() {
-                let prec = u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
-                offset += 4;
-                prec
-            } else {
-                0
-            };
-
-            let scale = if offset + 2 <= data.len() {
-                let s = i16::from_le_bytes([data[offset], data[offset + 1]]);
-                offset += 2;
-                s
-            } else {
-                0
-            };
-
-            let _display_size = if offset + 2 <= data.len() {
-                let ds = u16::from_le_bytes([data[offset], data[offset + 1]]);
-                offset += 2;
-                ds as u32
-            } else {
-                0
-            };
 
             columns.push(Column {
                 name: col_name,
-                type_code,
+                type_code: first_col_type,
                 type_name,
-                precision,
-                scale,
-                nullable: true,
+                precision: 0,
+                scale: 0,
+                nullable: first_nullable != 0,
+                display_size: 0,
                 table_name,
                 schema_name,
-                display_size: 0,
             });
         }
 
-        // Parse rows starting after column metadata
-        let mut rows = Vec::new();
+        // === Subsequent Columns ===
+        for _ci in 1..col_count {
+            // Between-columns metadata (12 bytes)
+            if offset + 12 > data.len() {
+                break;
+            }
+            offset += 12; // nullable_flags(4) + precision(4) + reserved(4)
 
-        while offset + 10 <= data.len() {
-            // Row header: 2 bytes total size + 8 bytes row_id
-            let row_size = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+            // Column N header (19 bytes)
+            if offset + 19 > data.len() {
+                break;
+            }
+            let c_type = i32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]);
+            let c_nullable = u16::from_le_bytes([data[offset + 4], data[offset + 5]]);
+            let c_display = u16::from_le_bytes([data[offset + 6], data[offset + 7]]);
+            offset += 8; // skip to col_name_len
+            // reserved(1) + col_index(1)
             offset += 2;
+            let c_name_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
+            let c_type_name_len = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
+            let c_table_len = u16::from_le_bytes([data[offset + 4], data[offset + 5]]) as usize;
+            let c_schema_len = u16::from_le_bytes([data[offset + 6], data[offset + 7]]) as usize;
+            offset += 8; // lengths
+            offset += 1; // padding
 
-            if row_size == 0 {
-                break;
+            // Column N strings: padding(1) + col_name + type_name + table_name + schema_name + terminator(1)
+            if offset < data.len() && data[offset] == 0 {
+                offset += 1; // padding byte
             }
-
-            let row_id = if offset + 8 <= data.len() {
-                let rid = i64::from_le_bytes([
-                    data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-                    data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
-                ]);
-                offset += 8;
-                rid
+            let c_name = if c_name_len > 0 && offset + c_name_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + c_name_len]).to_string()
             } else {
-                break;
+                String::new()
             };
+            offset += c_name_len;
 
-            // Parse column values
-            let mut values = Vec::with_capacity(columns.len());
+            let c_type_name = if c_type_name_len > 0 && offset + c_type_name_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + c_type_name_len]).to_string()
+            } else {
+                String::new()
+            };
+            offset += c_type_name_len;
 
-            for _col in &columns {
-                if offset + 2 > data.len() {
-                    values.push(None);
-                    continue;
-                }
+            let c_table = if c_table_len > 0 && offset + c_table_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + c_table_len]).to_string()
+            } else {
+                String::new()
+            };
+            offset += c_table_len;
 
-                let val_len = u16::from_le_bytes([data[offset], data[offset + 1]]) as usize;
-                offset += 2;
+            let c_schema = if c_schema_len > 0 && offset + c_schema_len <= data.len() {
+                String::from_utf8_lossy(&data[offset..offset + c_schema_len]).to_string()
+            } else {
+                String::new()
+            };
+            offset += c_schema_len;
 
-                if val_len == 0xFFFF as usize || val_len == 0 {
-                    values.push(None);
-                } else if offset + val_len <= data.len() {
-                    values.push(Some(data[offset..offset + val_len].to_vec()));
-                    offset += val_len;
-                } else {
-                    values.push(None);
-                    break;
-                }
+            // Skip terminator
+            if offset < data.len() {
+                offset += 1;
             }
 
-            rows.push(Row { row_id, values });
+            columns.push(Column {
+                name: c_name,
+                type_code: c_type,
+                type_name: c_type_name,
+                precision: 0,
+                scale: 0,
+                nullable: c_nullable != 0,
+                display_size: c_display as u32,
+                table_name: c_table,
+                schema_name: c_schema,
+            });
+        }
+
+        // === Inline Row Data (OPE responses only) ===
+        // Two row formats depending on sub_type:
+        //   sub_type=2: compact format (V$VERSION style) - marker(1)+flags(1)+val_size(2)+value(N)
+        //   sub_type=7: full format (SELECT style) - row_size(1)+flags(1)+rec_id(4)+padding(4)+col_offsets+values
+        let mut rows = Vec::new();
+        if sub_type == 2 {
+            // Compact row format: scan for marker 0x0C to find each row
+            while offset < data.len() {
+                let row_start = offset;
+                let marker = data[offset];
+                if marker == 0 { break; }
+                if offset + 4 > data.len() { break; }
+                let _flags = data[offset + 1];
+                let val_size = u16::from_le_bytes([data[offset + 2], data[offset + 3]]) as usize;
+                if val_size == 0 || offset + 4 + val_size > data.len() { break; }
+                let value_bytes = data[offset + 4..offset + 4 + val_size].to_vec();
+                // Find next row by scanning for 0x0C marker
+                let next_scan = offset + 4 + val_size;
+                let mut found = false;
+                for scan in next_scan..data.len() {
+                    if data[scan] == 0x0C {
+                        offset = scan;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found { offset = data.len(); }
+                let mut values = Vec::with_capacity(columns.len());
+                values.push(Some(value_bytes));
+                for _ in 1..columns.len() {
+                    values.push(None);
+                }
+                rows.push(Row { row_id: row_start as u16, values });
+            }
+        } else {
+            // Full row format (sub_type=7 and others)
+            while offset < data.len() {
+                let row_start = offset;
+                let row_size = data[offset] as usize;
+                if row_size == 0 || offset + row_size > data.len() { break; }
+                let _flags = data[offset + 1];
+                let rec_id = u32::from_le_bytes([
+                    data[offset + 2], data[offset + 3], data[offset + 4], data[offset + 5],
+                ]);
+                let offsets_start = row_start + 10;
+                let col_offsets: Vec<u16> = (0..columns.len()).map(|c| {
+                    let o = offsets_start + c * 2;
+                    if o + 2 <= data.len() {
+                        u16::from_le_bytes([data[o], data[o + 1]])
+                    } else { 0 }
+                }).collect();
+                let mut values = Vec::with_capacity(columns.len());
+                for (_ci, col_off) in col_offsets.iter().enumerate() {
+                    let val_abs = row_start + *col_off as usize;
+                    if val_abs + 2 > data.len() { values.push(None); continue; }
+                    let val_size = u16::from_le_bytes([data[val_abs], data[val_abs + 1]]) as usize;
+                    if val_size == 0 {
+                        values.push(None);
+                    } else if val_abs + 2 + val_size <= data.len() {
+                        values.push(Some(data[val_abs + 2..val_abs + 2 + val_size].to_vec()));
+                    } else {
+                        values.push(None);
+                    }
+                }
+                offset = row_start + row_size;
+                rows.push(Row { row_id: rec_id as u16, values });
+            }
         }
 
         Ok(Self {
             col_count,
-            row_count: rows.len() as u32,
+            row_count: header_row_count,
             columns,
             rows,
         })
+    }
+
+    /// Helper to safely read u32 LE.
+    fn safe_u32(data: &[u8], offset: usize) -> u32 {
+        if offset + 4 <= data.len() {
+            u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+        } else {
+            0
+        }
     }
 
     /// Check if this response contains result rows.
@@ -330,6 +440,15 @@ mod tests {
             values: vec![Some(vec![1, 0, 0, 0])],
         };
         assert_eq!(row.get_i32(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_row_get_i32_single_byte() {
+        let row = Row {
+            row_id: 0,
+            values: vec![Some(vec![42])],
+        };
+        assert_eq!(row.get_i32(0).unwrap(), 42);
     }
 
     #[test]
@@ -382,13 +501,124 @@ mod tests {
     }
 
     #[test]
-    fn test_exec_response_minimal() {
-        // Minimal valid header (34 bytes)
-        let mut data = vec![0u8; 64];
-        data[16] = 0; // col_count = 0
+    fn test_exec_response_minimal_empty() {
+        // Valid empty response: header(16) + col_header(16) + null_terminator(1)
+        let data = [
+            0x07, 0x00, 0x00, 0x00, // sub_type
+            0x04, 0x00, 0x00, 0x00, // flags
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x00, // row_count = 0
+            0x00, 0x00, 0x00, 0x00, // col_type = 0
+            0x00, 0x00,             // nullable
+            0x00, 0x00,             // display
+            0x00, 0x00,             // col_count = 0
+            0x00, 0x00,             // type_name_len
+            0x00, 0x00,             // table_name_len
+            0x00, 0x00,             // schema_name_len
+        ];
         let resp = ExecResponse::from_bytes(&data).unwrap();
         assert_eq!(resp.col_count, 0);
         assert_eq!(resp.num_columns(), 0);
         assert_eq!(resp.num_rows(), 0);
+    }
+
+    #[test]
+    fn test_exec_response_select1_ope() {
+        // OPE response for "SELECT 1 FROM DUAL" (58 bytes)
+        let data: Vec<u8> = vec![
+            0x07,0x00,0x00,0x00, 0x04,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x01,0x00,0x00,0x00, // header (row_count=1)
+            0x04,0x00,0x00,0x00, 0x00,0x00, 0x01,0x00, 0x01,0x00, 0x07,0x00, 0x00,0x00, 0x00,0x00, // col1 header (type=4, nullable=0, col_count=1, col_name_len=1, type_name_len=7)
+            0x31,0x49,0x4e,0x54,0x45,0x47,0x45,0x52, 0x00, // col1 strings: "1" + "INTEGER" + \0
+            // Row data (18 bytes): marker=18, flags=0, rec_id=0, padding=0, col_off=12, val_size=4, val=1
+            0x12, 0x00, 0x00,0x00,0x00,0x00, 0x00,0x00, 0x00,0x00, 0x0c,0x00, 0x04,0x00, 0x01,0x00,0x00,0x00,
+        ];
+        let resp = ExecResponse::from_bytes(&data).unwrap();
+        assert_eq!(resp.col_count, 1);
+        assert_eq!(resp.num_columns(), 1);
+        assert_eq!(resp.num_rows(), 1);
+        assert_eq!(resp.columns[0].name, "1");
+        assert_eq!(resp.columns[0].type_name, "INTEGER");
+        assert_eq!(resp.columns[0].type_code, 4);
+        assert_eq!(resp.rows[0].get_i32(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_exec_response_sample_ope() {
+        // OPE response for "SELECT ID, NAME FROM SAMPLE" (105 + row data)
+        let data: Vec<u8> = vec![
+            0x07,0x00,0x00,0x00, 0x04,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, // header
+            0x04,0x00,0x00,0x00, 0x00,0x00, 0x02,0x00, 0x02,0x00, 0x03,0x00, 0x06,0x00, 0x06,0x00, // col1 header (type=4, nullable=0, col_count=2, col_name_len=2)
+            0x49,0x44, 0x49,0x4e,0x54, 0x53,0x41,0x4d,0x50,0x4c,0x45, 0x53,0x59,0x53,0x44,0x42,0x41, // col1 strings
+            // Between cols (12 bytes)
+            0x02,0x00,0x00,0x00, 0xc8,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+            // Col2 header (19 bytes)
+            0x01,0x00,0x00,0x00, 0x00,0x00, 0x00,0x00, 0x00,0x01, 0x04,0x00, 0x07,0x00, 0x06,0x00, 0x06,0x00, 0x00,
+            // Col2 strings: padding + NAME + VARCHAR + SAMPLE + SYSDBA + terminator
+            0x00, 0x4e,0x41,0x4d,0x45, 0x56,0x41,0x52,0x43,0x48,0x41,0x52, 0x53,0x41,0x4d,0x50,0x4c,0x45, 0x53,0x59,0x53,0x44,0x42,0x41, 0x01,
+            // Row 1: Alice (ID=1, NAME="Alice")
+            0x1b, 0x00, 0x01,0x00,0x00,0x00, 0x00,0x00,0x00,0x00, 0x0e,0x00, 0x14,0x00, 0x04,0x00, 0x01,0x00,0x00,0x00, 0x05,0x00, 0x41,0x6c,0x69,0x63,0x65,
+        ];
+        let resp = ExecResponse::from_bytes(&data).unwrap();
+        assert_eq!(resp.col_count, 2);
+        assert_eq!(resp.num_columns(), 2);
+        assert_eq!(resp.num_rows(), 1);
+        assert_eq!(resp.columns[0].name, "ID");
+        assert_eq!(resp.columns[0].type_name, "INT");
+        assert_eq!(resp.columns[1].name, "NAME");
+        assert_eq!(resp.columns[1].type_name, "VARCHAR");
+        assert_eq!(resp.rows[0].get_i32(0).unwrap(), 1);
+        assert_eq!(resp.rows[0].get_str(1).unwrap(), "Alice");
+    }
+
+    #[test]
+    fn test_exec_response_select1_ope_no_null_term() {
+        // Actual OPE response from DM 8.1.3.62 - no \0 terminator (58 bytes)
+        let data: Vec<u8> = vec![
+            0x07, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, // header (row_count=1)
+            0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, // col1 header (type=4, nullable=0, col_count=1, col_name_len=1)
+            // Strings: "1" + "INTEGER" (no \0 terminator!)
+            0x31, 0x49, 0x4e, 0x54, 0x45, 0x47, 0x45, 0x52,
+            // Row data: marker=18, flags=0, rec_id=0, padding=0, col_off=12, val_size=4, val=1
+            0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x0c, 0x00, 0x04, 0x00, 0x01, 0x00,
+            0x00, 0x00,
+        ];
+        let resp = ExecResponse::from_bytes(&data).unwrap();
+        assert_eq!(resp.col_count, 1);
+        assert_eq!(resp.num_columns(), 1);
+        assert_eq!(resp.num_rows(), 1);
+        assert_eq!(resp.columns[0].name, "1");
+        assert_eq!(resp.columns[0].type_name, "INTEGER");
+        assert_eq!(resp.columns[0].type_code, 4);
+        assert_eq!(resp.rows[0].get_i32(0).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_exec_response_incomplete() {
+        let data = [0x00, 0x00, 0x00];
+        let result = ExecResponse::from_bytes(&data);
+        assert!(matches!(result, Err(crate::error::Error::Incomplete)));
+    }
+
+    #[test]
+    fn test_row_get_i32_null() {
+        let row = Row {
+            row_id: 0,
+            values: vec![None],
+        };
+        assert!(row.get_i32(0).is_err());
+        assert!(row.is_null(0));
+    }
+
+    #[test]
+    fn test_row_get_str_empty() {
+        let row = Row {
+            row_id: 0,
+            values: vec![Some(vec![])],
+        };
+        let result = row.get_str(0).unwrap();
+        assert_eq!(result, "");
     }
 }

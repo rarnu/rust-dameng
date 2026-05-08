@@ -1,10 +1,16 @@
 //! EXEC message (type 5) for preparing and executing SQL statements.
+//!
+//! Two variants are provided:
+//! - `ExecMessage`: simple format (SQL + null terminator) for direct execution.
+//! - `ExecMessageV2`: full Go driver-compatible format with auto_commit,
+//!   has_result_set, exec_type, max_rows, timeout, and UTF-16 SQL encoding.
 
 use bytes::{BufMut, BytesMut};
 
 /// Client->Server EXEC message (type 5).
 ///
-/// Used to prepare a statement or execute it directly.
+/// Simple format: SQL string followed by a null terminator.
+/// Used for direct execution without parameters.
 #[derive(Debug, Clone)]
 pub struct ExecMessage {
     /// Whether this is a prepared statement (1) or direct execution (0).
@@ -34,24 +40,108 @@ impl ExecMessage {
         }
     }
 
-    /// Encode to payload bytes.
+    /// Encode to payload bytes (simple format: SQL + null terminator).
+    pub fn encode_payload(&self) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.put_slice(self.sql.as_bytes());
+        buf.put_u8(0); // null terminator
+        buf
+    }
+}
+
+/// Client->Server EXEC message v2 (type 5).
+///
+/// Full Go driver-compatible format. Supports:
+/// - auto_commit control
+/// - has_result_set flag (SELECT vs DML)
+/// - max_rows for pagination
+/// - query timeout
+/// - UTF-16 LE encoded SQL string
+///
+/// Wire format:
+/// ```text
+/// Offset  Size  Field
+/// 0       1     auto_commit (0 or 1)
+/// 1       1     has_result_set (1=SELECT, 0=DML)
+/// 2       4     reserved (zeros)
+/// 6       2     exec_type (u16 LE)
+/// 8       8     max_rows (i64 LE) - 0=unlimited
+/// 16      1     bdta flag
+/// 17      4     timeout (i32 LE) - 0=default
+/// 21      2     bind_options (u16 LE)
+/// 23      2     sql_length (u16 LE) - number of UTF-16 chars
+/// 25      N     SQL text (UTF-16 LE, 2 bytes per char)
+/// ```
+#[derive(Debug, Clone)]
+pub struct ExecMessageV2 {
+    /// Auto-commit mode (true = commit after execution).
+    pub auto_commit: bool,
+    /// Whether this query returns a result set.
+    pub has_result_set: bool,
+    /// Maximum rows to return (0 = unlimited).
+    pub max_rows: i64,
+    /// Query timeout in seconds (0 = default).
+    pub timeout: i32,
+    /// The SQL string.
+    pub sql: String,
+}
+
+impl ExecMessageV2 {
+    /// Create a new v2 exec message with default settings.
+    pub fn new(sql: &str) -> Self {
+        Self {
+            auto_commit: true,
+            has_result_set: sql.trim_start().to_uppercase().starts_with("SELECT"),
+            max_rows: 0,
+            timeout: 0,
+            sql: sql.to_string(),
+        }
+    }
+
+    /// Create for DML statements (INSERT/UPDATE/DELETE).
+    pub fn dml(sql: &str) -> Self {
+        Self {
+            auto_commit: true,
+            has_result_set: false,
+            max_rows: 0,
+            timeout: 0,
+            sql: sql.to_string(),
+        }
+    }
+
+    /// Create for SELECT statements.
+    pub fn select(sql: &str) -> Self {
+        Self {
+            auto_commit: true,
+            has_result_set: true,
+            max_rows: 0,
+            timeout: 0,
+            sql: sql.to_string(),
+        }
+    }
+
+    /// Encode to payload bytes (v2 format with UTF-16 SQL).
     pub fn encode_payload(&self) -> BytesMut {
         let mut buf = BytesMut::new();
 
-        buf.put_u8(self.is_prepared);
-        buf.put_u8(0); // reserved
-        buf.put_u16_le(0); // reserved
-        buf.put_u16_le(self.param_count);
+        // Header
+        buf.put_u8(if self.auto_commit { 1 } else { 0 });
+        buf.put_u8(if self.has_result_set { 1 } else { 0 });
         buf.put_u32_le(0); // reserved
-        buf.put_u16_le(0); // reserved
-        buf.put_u32_le(0); // reserved
-        buf.put_u32_le(0); // reserved
-        buf.put_u32_le(0); // reserved
-        buf.put_u32_le(0); // reserved
+        buf.put_u16_le(0); // exec_type
 
-        // SQL string (null-terminated)
-        buf.put_slice(self.sql.as_bytes());
-        buf.put_u8(0); // null terminator
+        // Execution options
+        buf.put_i64_le(self.max_rows); // max_rows
+        buf.put_u8(0);                 // bdta flag
+        buf.put_i32_le(self.timeout);  // timeout
+        buf.put_u16_le(0);             // bind_options
+
+        // SQL as UTF-16 LE
+        let sql_utf16: Vec<u16> = self.sql.encode_utf16().collect();
+        buf.put_u16_le(sql_utf16.len() as u16); // sql_length (char count)
+        for &ch in &sql_utf16 {
+            buf.put_u16_le(ch);
+        }
 
         buf
     }
@@ -60,6 +150,8 @@ impl ExecMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- ExecMessage (simple) tests ---
 
     #[test]
     fn test_exec_new_direct() {
@@ -80,7 +172,6 @@ mod tests {
         let sql = "DELETE FROM SAMPLE WHERE ID = 998";
         let exec = ExecMessage::new(sql, 0);
         let payload = exec.encode_payload();
-        // SQL should be in the payload after the header bytes
         let sql_in_payload = &payload[payload.len() - sql.len() - 1..payload.len() - 1];
         assert_eq!(sql_in_payload, sql.as_bytes());
     }
@@ -89,7 +180,7 @@ mod tests {
     fn test_exec_encode_null_terminated() {
         let exec = ExecMessage::new("COMMIT", 0);
         let payload = exec.encode_payload();
-        assert_eq!(payload[payload.len() - 1], 0); // null terminator
+        assert_eq!(payload[payload.len() - 1], 0);
     }
 
     #[test]
@@ -104,8 +195,93 @@ mod tests {
     fn test_exec_payload_size() {
         let exec = ExecMessage::new("SELECT 1", 0);
         let payload = exec.encode_payload();
-        // 20 bytes header + 8 bytes SQL + 1 null = 29... but actual is 37 with current layout
-        // Just check it's > 0 and contains the SQL
-        assert!(payload.len() > 20);
+        assert_eq!(payload.len(), "SELECT 1".len() + 1);
+    }
+
+    // --- ExecMessageV2 tests ---
+
+    #[test]
+    fn test_exec_v2_new_select() {
+        let exec = ExecMessageV2::new("SELECT * FROM SAMPLE");
+        assert!(exec.auto_commit);
+        assert!(exec.has_result_set);
+        assert_eq!(exec.max_rows, 0);
+    }
+
+    #[test]
+    fn test_exec_v2_dml() {
+        let exec = ExecMessageV2::dml("DELETE FROM SAMPLE WHERE ID = 1");
+        assert!(exec.auto_commit);
+        assert!(!exec.has_result_set);
+    }
+
+    #[test]
+    fn test_exec_v2_select() {
+        let exec = ExecMessageV2::select("SELECT ID FROM SAMPLE");
+        assert!(exec.has_result_set);
+    }
+
+    #[test]
+    fn test_exec_v2_encode_minimal() {
+        let exec = ExecMessageV2::new("SELECT 1");
+        let payload = exec.encode_payload();
+        // Header: 25 bytes + UTF-16 SQL (8 chars * 2 = 16 bytes for "SELECT 1")
+        assert_eq!(payload.len(), 41);
+        assert_eq!(payload[0], 1); // auto_commit
+        assert_eq!(payload[1], 1); // has_result_set (SELECT inferred)
+    }
+
+    #[test]
+    fn test_exec_v2_encode_sql_utf16() {
+        let exec = ExecMessageV2::new("AB");
+        let payload = exec.encode_payload();
+        // After 25-byte header: sql_len(u16) + 'A'(u16 LE) + 'B'(u16 LE)
+        assert_eq!(payload[23], 2); // sql_length low byte
+        assert_eq!(payload[24], 0); // sql_length high byte
+        assert_eq!(payload[25], 0x41); assert_eq!(payload[26], 0); // 'A'
+        assert_eq!(payload[27], 0x42); assert_eq!(payload[28], 0); // 'B'
+    }
+
+    #[test]
+    fn test_exec_v2_encode_cjk_utf16() {
+        let exec = ExecMessageV2::new("测");
+        let payload = exec.encode_payload();
+        // '测' = U+6D4B -> LE bytes: 0x4B 0x6D
+        assert_eq!(payload[25], 0x4B);
+        assert_eq!(payload[26], 0x6D);
+    }
+
+    #[test]
+    fn test_exec_v2_no_auto_commit() {
+        let mut exec = ExecMessageV2::select("SELECT 1");
+        exec.auto_commit = false;
+        let payload = exec.encode_payload();
+        assert_eq!(payload[0], 0);
+    }
+
+    #[test]
+    fn test_exec_v2_max_rows() {
+        let mut exec = ExecMessageV2::select("SELECT 1");
+        exec.max_rows = 100;
+        let payload = exec.encode_payload();
+        // max_rows at offset 8-15
+        assert_eq!(i64::from_le_bytes([payload[8], payload[9], payload[10], payload[11], payload[12], payload[13], payload[14], payload[15]]), 100);
+    }
+
+    #[test]
+    fn test_exec_v2_timeout() {
+        let mut exec = ExecMessageV2::select("SELECT 1");
+        exec.timeout = 30;
+        let payload = exec.encode_payload();
+        // timeout at offset 17-20
+        assert_eq!(i32::from_le_bytes([payload[17], payload[18], payload[19], payload[20]]), 30);
+    }
+
+    #[test]
+    fn test_exec_v2_empty_sql() {
+        let exec = ExecMessageV2::new("");
+        let payload = exec.encode_payload();
+        assert_eq!(payload.len(), 25); // header only
+        assert_eq!(u16::from_le_bytes([payload[23], payload[24]]), 0); // sql_length = 0
     }
 }

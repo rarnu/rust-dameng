@@ -1,4 +1,4 @@
-//! Transaction control messages: COMMIT (type 8) and ROLLBACK (type 7).
+//! Transaction control messages: COMMIT (type 8) and ROLLBACK (type 9).
 
 use bytes::BytesMut;
 
@@ -15,7 +15,7 @@ impl CommitMessage {
     }
 }
 
-/// Client->Server ROLLBACK message (type 7).
+/// Client->Server ROLLBACK message (type 9).
 ///
 /// Rolls back the current transaction.
 #[derive(Debug, Clone)]

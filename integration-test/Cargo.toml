@@ -8,9 +8,22 @@ description = "Integration tests against live DM instance"
 name = "dm-integration-test"
 path = "src/main.rs"
 
+[[bin]]
+name = "debug_version_ope"
+path = "src/bin/debug_version_ope.rs"
+
+[[bin]]
+name = "debug_version"
+path = "src/bin/debug_version.rs"
+
+[[bin]]
+name = "trace_parser"
+path = "src/bin/trace_parser.rs"
+
 [dependencies]
 dameng-protocol = { path = "../dameng-protocol" }
 dameng-types = { path = "../dameng-types" }
 dameng = { path = "../dameng" }
 tokio-dameng = { path = "../tokio-dameng" }
 tokio = { version = "1", features = ["full"] }
+bytes = "1"

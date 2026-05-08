@@ -1,8 +1,8 @@
-//! FETCH message (type 21) for retrieving more rows from a result set.
+//! FETCH message (type 7) for retrieving more rows from a result set.
 
 use bytes::{BufMut, BytesMut};
 
-/// Client->Server FETCH message (type 21).
+/// Client->Server FETCH message (type 7).
 ///
 /// Requests the next batch of rows from a previously executed query.
 #[derive(Debug, Clone)]

@@ -10,6 +10,7 @@ pub enum Error {
     AuthFailed(String),
     ServerError(i32, String),
     DecodeError(String),
+    QueryFailed(String),
     NotConnected,
 }
 
@@ -22,6 +23,7 @@ impl fmt::Display for Error {
             Error::AuthFailed(s) => write!(f, "auth failed: {s}"),
             Error::ServerError(code, msg) => write!(f, "server error {code}: {msg}"),
             Error::DecodeError(s) => write!(f, "decode error: {s}"),
+            Error::QueryFailed(s) => write!(f, "query failed: {s}"),
             Error::NotConnected => write!(f, "not connected"),
         }
     }

@@ -7,10 +7,12 @@ use std::fmt;
 pub enum Error {
     /// Not enough bytes to parse a frame or message.
     Incomplete,
+    /// Checksum mismatch in frame header.
+    ChecksumMismatch,
     /// Invalid frame header (bad length, unknown version, etc.).
     InvalidFrame(String),
     /// Unknown message type.
-    UnknownMessageType(u16),
+    UnknownMessageType(u8),
     /// Failed to decode a string value.
     DecodeError(String),
     /// I/O error during read/write.
@@ -25,6 +27,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Incomplete => write!(f, "incomplete protocol data"),
+            Error::ChecksumMismatch => write!(f, "checksum mismatch"),
             Error::InvalidFrame(s) => write!(f, "invalid frame: {s}"),
             Error::UnknownMessageType(t) => write!(f, "unknown message type: {t}"),
             Error::DecodeError(s) => write!(f, "decode error: {s}"),

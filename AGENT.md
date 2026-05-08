@@ -7,7 +7,7 @@ Build a complete async Rust driver for Dameng (达梦) database implementing sql
 ## Working Directory
 
 - Project root: `/Users/rarnu/Code/github/rust-dameng-ex/`
-- Read-only reference: `./dmPython/` (NEVER modify)
+- Read-only reference: `./dm_go/` (NEVER modify)
 - Scripts go in `./scripts/`
 
 ## DM Database Instance
@@ -24,7 +24,7 @@ Build a complete async Rust driver for Dameng (达梦) database implementing sql
 1. Follow DESIGN.md strictly for architecture and implementation order
 2. Every function MUST have doc comments and at least 3 test cases
 3. Use sqlx-standard patterns for tests and API design
-4. When stuck on protocol details, reference dmPython source or protocol captures in /tmp/dm_dumps/ and /tmp/proxy_bind.log
+4. When stuck on protocol details, reference dm_go source or protocol captures in /tmp/dm_dumps/ and /tmp/proxy_bind.log
 5. Strict separation: tests/ for unit tests, examples/ for usage examples
 6. All helper scripts go in scripts/ directory — no临时 scripts
 7. Git commit after every meaningful change — each commit must compile and pass tests

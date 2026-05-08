@@ -22,11 +22,20 @@ pub enum State {
 /// A synchronous Dameng database client.
 pub struct Client {
     stream: Option<TcpStream>,
-    state: State,
-    host: String,
-    port: u16,
-    handle: u16,
-    challenge: Vec<u8>,
+    /// Connection state.
+    pub state: State,
+    /// Host.
+    pub host: String,
+    /// Port.
+    pub port: u16,
+    /// Connection handle.
+    pub handle: i32,
+    /// Server challenge for encryption.
+    pub challenge: Vec<u8>,
+    /// Auto-commit mode.
+    pub auto_commit: bool,
+    /// Server encoding (1=UTF-8, 2=GB18030).
+    pub encoding: u8,
 }
 
 impl Client {
@@ -39,6 +48,8 @@ impl Client {
             port,
             handle: 0,
             challenge: vec![],
+            auto_commit: true,
+            encoding: 1,
         }
     }
 
@@ -66,9 +77,9 @@ impl Client {
 
     /// Send a startup message to the server.
     fn send_startup(&mut self) -> Result<()> {
-        let msg = StartupMessage::new(&[]);
+        let msg = StartupMessage::new();
         let payload = msg.encode_payload();
-        let frame_data = crate::build_message(msg_type::STARTUP, 0, &payload);
+        let frame_data = build_message(STARTUP, 0, &payload);
         self.write_all(&frame_data)?;
         Ok(())
     }
@@ -76,13 +87,13 @@ impl Client {
     /// Read the server's startup response.
     fn read_startup_response(&mut self) -> Result<StartupResponse> {
         let (frame, payload) = self.read_message()?;
-        if frame.msg_type != msg_type::STARTUP_RESPONSE {
+        if frame.msg_type != STARTUP_RESPONSE && frame.msg_type != ACK {
             return Err(Error::ConnectionFailed(format!(
-                "expected STARTUP_RESPONSE got msg_type={}",
+                "expected STARTUP_RESPONSE or ACK got msg_type={}",
                 frame.msg_type
             )));
         }
-        StartupResponse::from_bytes(&payload)
+        StartupResponse::from_bytes(&payload, frame.response_code)
             .map_err(|e| Error::Protocol(e))
     }
 
@@ -90,7 +101,7 @@ impl Client {
     fn send_login(&mut self, username: &str, password: &str) -> Result<()> {
         let login = LoginMessage::new(username, password, &self.host);
         let payload = login.encode_payload(&self.challenge);
-        let frame_data = crate::build_message(msg_type::LOGIN, 0, &payload);
+        let frame_data = build_message(LOGIN, 0, &payload);
         self.write_all(&frame_data)?;
         Ok(())
     }
@@ -98,7 +109,7 @@ impl Client {
     /// Read the login response.
     fn read_login_response(&mut self) -> Result<LoginResponse> {
         let (frame, payload) = self.read_message()?;
-        if frame.msg_type != msg_type::LOGIN_RESPONSE {
+        if frame.msg_type != LOGIN_RESPONSE {
             return Err(Error::ConnectionFailed(format!(
                 "expected LOGIN_RESPONSE got msg_type={}",
                 frame.msg_type
@@ -108,34 +119,176 @@ impl Client {
             .map_err(|e| Error::Protocol(e))
     }
 
+    /// Begin a new transaction by disabling auto-commit.
+    pub fn begin(&mut self) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        self.auto_commit = false;
+        Ok(())
+    }
+
+    /// Allocate a new statement handle from the server.
+    pub fn allocate_statement(&mut self) -> Result<u32> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let alloc = StatementAllocateMessage::new();
+        let payload = alloc.encode_payload();
+        self.write_all(&build_message(STATEMENT_PREPARE, 0, &payload))?;
+        let (frame, resp_payload) = self.read_message()?;
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "allocate statement failed: code={}",
+                frame.response_code
+            )));
+        }
+        StatementAllocateMessage::parse_response(&resp_payload)
+            .map_err(|e| Error::Protocol(e))
+    }
+
+    /// Free a statement handle.
+    pub fn free_statement(&mut self, stmt_id: u32) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let free = StatementFreeMessage::new(stmt_id);
+        let payload = free.encode_payload();
+        self.write_all(&build_message(STATEMENT_FREE, 0, &payload))?;
+        let (frame, _) = self.read_message()?;
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "free statement {} failed: code={}",
+                stmt_id, frame.response_code
+            )));
+        }
+        Ok(())
+    }
+
+    /// Prepare a SQL statement on the server.
+    pub fn prepare(&mut self, stmt_id: u32, sql: &str) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode())?;
+        self.read_message()?;
+
+        let exec = ExecMessage::new(sql, 0);
+        let exec_payload = exec.encode_payload();
+        self.write_all(&build_message(EXEC, stmt_id as i32, &exec_payload))?;
+        let (frame, _) = self.read_message()?;
+        if frame.response_code < 0 {
+            return Err(Error::QueryFailed(format!(
+                "prepare failed: code={}",
+                frame.response_code
+            )));
+        }
+        Ok(())
+    }
+
+    /// Execute a SQL with bound parameters.
+    pub fn execute_with_params(
+        &mut self,
+        stmt_id: u32,
+        sql: &str,
+        params: &[BindParam],
+    ) -> Result<Vec<Row>> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        let is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
+
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode())?;
+        self.read_message()?;
+
+        if params.is_empty() {
+            let exec = ExecMessage::new(sql, 0);
+            let exec_payload = exec.encode_payload();
+            self.write_all(&build_message(
+                EXEC,
+                if stmt_id > 0 { stmt_id as i32 } else { 0 },
+                &exec_payload,
+            ))?;
+            return self.read_exec_response();
+        }
+
+        let bind = BindExec2Message::new(self.auto_commit, is_select, params.to_vec());
+        let bind_payload = bind.encode_payload();
+        self.write_all(&build_message(BIND, stmt_id as i32, &bind_payload))?;
+        self.read_exec_response()
+    }
+
     /// Execute a SQL statement without parameters.
     pub fn execute(&mut self, sql: &str) -> Result<Vec<Row>> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
 
-        // Send READY first
-        let ready = ReadyMessage::new();
-        let ready_payload = ready.encode_payload();
-        self.write_all(&crate::build_message(msg_type::READY, self.handle, &ready_payload))?;
+        // Send READY with empty payload before EXEC (required by server)
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode())?;
         self.read_message()?; // consume ACK
 
-        // Send EXEC
+        // Send OPTIMIZED_PREPARE_EXEC (type 91) - returns inline row data
         let exec = ExecMessage::new(sql, 0);
         let exec_payload = exec.encode_payload();
-        self.handle += 1;
-        self.write_all(&crate::build_message(msg_type::EXEC, self.handle, &exec_payload))?;
+        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
         self.read_exec_response()
     }
 
     /// Read an EXEC_RESPONSE and parse into Rows.
     fn read_exec_response(&mut self) -> Result<Vec<Row>> {
         let (frame, payload) = self.read_message()?;
-        if frame.msg_type == msg_type::ACK {
-            // Simple ACK - no result rows
-            return Ok(vec![]);
+
+        // Check for error response (negative response_code)
+        if frame.response_code < 0 {
+            let mut error_detail = format!("response_code={}", frame.response_code);
+            if payload.len() >= 16 {
+                let msg_len = u32::from_le_bytes([
+                    payload[12],
+                    payload.get(13).copied().unwrap_or(0),
+                    payload.get(14).copied().unwrap_or(0),
+                    payload.get(15).copied().unwrap_or(0),
+                ]) as usize;
+                if msg_len > 0 && payload.len() >= 16 + msg_len {
+                    let msg = String::from_utf8_lossy(&payload[16..16 + msg_len]);
+                    error_detail = format!("{}: {}", frame.response_code, msg);
+                }
+            }
+            return Err(Error::QueryFailed(error_detail));
         }
-        if frame.msg_type == msg_type::EXEC_RESPONSE {
+
+        if frame.msg_type == ACK {
+            // OPE (type 91) returns ACK with inline row data in payload
+            if payload.is_empty() {
+                return Ok(vec![]);
+            }
+            let resp = ExecResponse::from_bytes(&payload)?;
+            let mut rows = Vec::new();
+            for row_data in resp.rows {
+                let columns: Vec<Column> = resp
+                    .columns
+                    .iter()
+                    .map(|c| Column {
+                        name: c.name.clone(),
+                        type_code: c.type_code,
+                        type_name: c.type_name.clone(),
+                        precision: c.precision,
+                        scale: c.scale,
+                        nullable: c.nullable,
+                    })
+                    .collect();
+                rows.push(Row {
+                    columns,
+                    values: row_data.values,
+                });
+            }
+            return Ok(rows);
+        }
+        if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
             let resp = ExecResponse::from_bytes(&payload)?;
             let mut rows = Vec::new();
             for row_data in resp.rows {
@@ -172,9 +325,9 @@ impl Client {
         }
         let ready = ReadyMessage::new();
         let payload = ready.encode_payload();
-        self.write_all(&crate::build_message(msg_type::READY, self.handle, &payload))?;
+        self.write_all(&build_message(READY, self.handle, &payload))?;
         let (frame, _) = self.read_message()?;
-        if frame.msg_type != msg_type::ACK {
+        if frame.msg_type != ACK {
             return Err(Error::ConnectionFailed(format!(
                 "expected ACK for READY got msg_type={}",
                 frame.msg_type
@@ -187,12 +340,19 @@ impl Client {
     pub fn commit(&mut self) -> Result<()> {
         let commit = CommitMessage;
         let payload = commit.encode_payload();
-        self.write_all(&crate::build_message(msg_type::COMMIT, self.handle, &payload))?;
+        self.write_all(&build_message(COMMIT, self.handle, &payload))?;
         let (frame, _payload) = self.read_message()?;
-        if frame.msg_type != msg_type::ACK {
+        // Server may return EXEC_RESPONSE (0) with success message instead of ACK (187)
+        if frame.msg_type != ACK && frame.msg_type != EXEC_RESPONSE {
             return Err(Error::ConnectionFailed(format!(
-                "expected ACK for COMMIT got msg_type={}",
+                "expected ACK/EXEC_RESPONSE for COMMIT got msg_type={}",
                 frame.msg_type
+            )));
+        }
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "COMMIT failed with resp_code={}",
+                frame.response_code
             )));
         }
         Ok(())
@@ -202,12 +362,18 @@ impl Client {
     pub fn rollback(&mut self) -> Result<()> {
         let rollback = RollbackMessage;
         let payload = rollback.encode_payload();
-        self.write_all(&crate::build_message(msg_type::ROLLBACK, self.handle, &payload))?;
+        self.write_all(&build_message(ROLLBACK, self.handle, &payload))?;
         let (frame, _) = self.read_message()?;
-        if frame.msg_type != msg_type::ACK {
+        if frame.msg_type != ACK && frame.msg_type != EXEC_RESPONSE {
             return Err(Error::ConnectionFailed(format!(
-                "expected ACK for ROLLBACK got msg_type={}",
+                "expected ACK/EXEC_RESPONSE for ROLLBACK got msg_type={}",
                 frame.msg_type
+            )));
+        }
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "ROLLBACK failed with resp_code={}",
+                frame.response_code
             )));
         }
         Ok(())
@@ -215,28 +381,51 @@ impl Client {
 
     /// Read a complete message (frame + payload) from the stream.
     fn read_message(&mut self) -> Result<(Frame, Vec<u8>)> {
+        use std::io::ErrorKind;
+
         let stream = self.stream.as_mut().ok_or(Error::NotConnected)?;
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + 4096);
 
-        // Read frame header
+        // Read frame header - retry on EAGAIN/EWOULDBLOCK
         loop {
             if buf.len() >= FRAME_HEADER_SIZE {
                 break;
             }
             let mut tmp = vec![0u8; 1024];
-            let n = stream.read(&mut tmp)?;
+            let n = loop {
+                match stream.read(&mut tmp) {
+                    Ok(n) => break n,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => return Err(Error::Io(e)),
+                }
+            };
             if n == 0 {
                 return Err(Error::ConnectionFailed("connection closed".to_string()));
             }
             buf.extend_from_slice(&tmp[..n]);
         }
 
+        // Frame::parse consumes the header bytes from buf, leaving only payload
         let frame = Frame::parse(&mut buf)?;
 
-        // Read payload
-        while buf.len() < FRAME_HEADER_SIZE + frame.payload_len as usize {
+        // After Frame::parse(), the header bytes have been consumed from buf.
+        // buf now only contains any payload bytes that were read before parsing.
+        let body_len = frame.body_len.max(0) as usize;
+        while buf.len() < body_len {
             let mut tmp = vec![0u8; 1024];
-            let n = stream.read(&mut tmp)?;
+            let n = loop {
+                match stream.read(&mut tmp) {
+                    Ok(n) => break n,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => return Err(Error::Io(e)),
+                }
+            };
             if n == 0 {
                 return Err(Error::ConnectionFailed(
                     "connection closed during payload read".to_string(),
@@ -245,8 +434,7 @@ impl Client {
             buf.extend_from_slice(&tmp[..n]);
         }
 
-        let payload =
-            buf[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + frame.payload_len as usize].to_vec();
+        let payload = buf[..body_len].to_vec();
 
         Ok((frame, payload))
     }
@@ -277,8 +465,8 @@ impl Drop for Client {
 }
 
 /// Build a complete message (frame + payload).
-pub fn build_message(msg_type: u16, handle: u16, payload: &[u8]) -> Vec<u8> {
-    let frame = Frame::new(msg_type, handle, payload.len() as u16);
+pub fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> Vec<u8> {
+    let frame = Frame::new(msg_type, handle, payload.len() as i32);
     let mut result = frame.encode().to_vec();
     result.extend_from_slice(payload);
     result
@@ -309,7 +497,7 @@ mod tests {
         let frame = Frame::parse(&mut buf).unwrap();
         assert_eq!(frame.msg_type, 200);
         assert_eq!(frame.handle, 0);
-        assert_eq!(frame.payload_len, 10);
+        assert_eq!(frame.body_len, 10);
     }
 
     #[test]

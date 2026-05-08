@@ -1,7 +1,19 @@
 //! 64-byte frame header for Dameng protocol messages.
 //!
-//! Every message sent between client and server is wrapped in a fixed-size
-//! 64-byte frame header followed by the variable-length payload.
+//! Layout (all multi-byte values are LITTLE ENDIAN):
+//! ```text
+//! Offset  Size  Field
+//! 0       4     Handle (i32 LE)
+//! 4       1     MsgType (u8)
+//! 5       1     Reserved (0)
+//! 6       4     BodyLen (i32 LE) - length of payload after header
+//! 10      4     ResponseCode (i32 LE) - filled by server
+//! 14      4     Reserved (0)
+//! 18      1     CompressFlag (u8)
+//! 19      1     Checksum (u8) - XOR of bytes 0-18
+//! 20      44    Reserved (zeros)
+//! 64      var   Payload body
+//! ```
 
 use bytes::{Buf, BufMut, BytesMut};
 
@@ -11,38 +23,29 @@ use crate::error::{Error, Result};
 pub const FRAME_HEADER_SIZE: usize = 64;
 
 /// DM protocol frame header (64 bytes).
-///
-/// Layout:
-/// ```text
-/// Offset  Size  Field
-/// 0       4     Version (LE u32, always 0)
-/// 4       2     MsgType (LE u16)
-/// 6       2     Handle (LE u16)
-/// 8       4     Reserved (u32)
-/// 12      4     Reserved (u32)
-/// 16      2     PayloadLen (LE u16)
-/// 18      16    Reserved (zeros)
-/// 34      2     Reserved (LE u16)
-/// 36      4     Checksum (LE u32)
-/// 40      24    Reserved (zeros)
-/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
-    /// Message type identifier.
-    pub msg_type: u16,
     /// Statement/connection handle.
-    pub handle: u16,
+    pub handle: i32,
+    /// Message type identifier.
+    pub msg_type: u8,
     /// Length of the payload following this header.
-    pub payload_len: u16,
+    pub body_len: i32,
+    /// Response code from server (0 for client messages).
+    pub response_code: i32,
+    /// Compression flag (0=none, 1=snappy, 2=zlib).
+    pub compress_flag: u8,
 }
 
 impl Frame {
-    /// Create a new frame header.
-    pub fn new(msg_type: u16, handle: u16, payload_len: u16) -> Self {
+    /// Create a new frame header for client messages.
+    pub fn new(msg_type: u8, handle: i32, body_len: i32) -> Self {
         Self {
-            msg_type,
             handle,
-            payload_len,
+            msg_type,
+            body_len,
+            response_code: 0,
+            compress_flag: 0,
         }
     }
 
@@ -54,20 +57,34 @@ impl Frame {
             return Err(Error::Incomplete);
         }
 
-        let _version = buf.get_u32_le(); // always 0
-        let msg_type = buf.get_u16_le();
-        let handle = buf.get_u16_le();
-        let _reserved = buf.get_u32_le();
-        let _reserved = buf.get_u32_le();
-        let payload_len = buf.get_u16_le();
+        // Compute XOR checksum of bytes 0-18 BEFORE consuming
+        let mut calc_xor: u8 = 0;
+        for i in 0..19 {
+            calc_xor ^= buf[i];
+        }
 
-        // Skip remaining reserved fields
-        buf.advance(42);
+        let handle = buf.get_i32_le();
+        let msg_type = buf.get_u8();
+        let _reserved = buf.get_u8();
+        let body_len = buf.get_i32_le();
+        let response_code = buf.get_i32_le();
+        let _reserved = buf.get_i32_le();
+        let compress_flag = buf.get_u8();
+        let checksum = buf.get_u8();
+
+        if calc_xor != checksum {
+            return Err(Error::ChecksumMismatch);
+        }
+
+        // Skip remaining 44 bytes of reserved
+        buf.advance(44);
 
         Ok(Frame {
-            msg_type,
             handle,
-            payload_len,
+            msg_type,
+            body_len,
+            response_code,
+            compress_flag,
         })
     }
 
@@ -75,15 +92,33 @@ impl Frame {
     pub fn encode(&self) -> BytesMut {
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE);
 
-        buf.put_u32_le(0); // version
-        buf.put_u16_le(self.msg_type);
-        buf.put_u16_le(self.handle);
-        buf.put_u32_le(0); // reserved
-        buf.put_u32_le(0); // reserved
-        buf.put_u16_le(self.payload_len);
-        buf.put_bytes(0, 46); // remaining reserved fields (64 - 18 = 46)
+        buf.put_i32_le(self.handle);
+        buf.put_u8(self.msg_type);
+        buf.put_u8(0); // reserved
+        buf.put_i32_le(self.body_len);
+        buf.put_i32_le(self.response_code);
+        buf.put_i32_le(0); // reserved
+        buf.put_u8(self.compress_flag);
+        buf.put_u8(0); // checksum placeholder
+
+        // Compute and write checksum at offset 19
+        let mut cs: u8 = 0;
+        for i in 0..19 {
+            cs ^= buf[i];
+        }
+        buf[19] = cs;
+
+        // Fill remaining 44 bytes with zeros (20-63)
+        buf.put_bytes(0, 44);
 
         debug_assert_eq!(buf.len(), FRAME_HEADER_SIZE);
+        buf
+    }
+
+    /// Encode frame header + payload into a single BytesMut.
+    pub fn encode_with_payload(&self, payload: &[u8]) -> BytesMut {
+        let mut buf = self.encode();
+        buf.extend_from_slice(payload);
         buf
     }
 }
@@ -97,7 +132,7 @@ mod tests {
         let frame = Frame::new(200, 0, 82);
         assert_eq!(frame.msg_type, 200);
         assert_eq!(frame.handle, 0);
-        assert_eq!(frame.payload_len, 82);
+        assert_eq!(frame.body_len, 82);
     }
 
     #[test]
@@ -109,10 +144,12 @@ mod tests {
 
     #[test]
     fn test_frame_roundtrip() {
-        let original = Frame::new(5, 42, 128);
+        let original = Frame::new(6, 42, 128);
         let mut encoded = original.encode();
         let parsed = Frame::parse(&mut encoded).unwrap();
-        assert_eq!(parsed, original);
+        assert_eq!(parsed.msg_type, 6);
+        assert_eq!(parsed.handle, 42);
+        assert_eq!(parsed.body_len, 128);
     }
 
     #[test]
@@ -124,14 +161,15 @@ mod tests {
 
     #[test]
     fn test_frame_encode_fields() {
-        let frame = Frame::new(228, 7, 255);
+        let frame = Frame::new(8, 7, 255);
         let encoded = frame.encode();
         let bytes = encoded.freeze();
 
-        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 0); // version
-        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 228); // msg_type
-        assert_eq!(u16::from_le_bytes([bytes[6], bytes[7]]), 7); // handle
-        assert_eq!(u16::from_le_bytes([bytes[16], bytes[17]]), 255); // payload_len
+        assert_eq!(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 7);
+        assert_eq!(bytes[4], 8);
+        assert_eq!(bytes[5], 0);
+        assert_eq!(i32::from_le_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]), 255);
+        assert_eq!(bytes[18], 0);
     }
 
     #[test]
@@ -140,6 +178,6 @@ mod tests {
         let frame = Frame::parse(&mut encoded).unwrap();
         assert_eq!(frame.msg_type, 13);
         assert_eq!(frame.handle, 3);
-        assert_eq!(frame.payload_len, 100);
+        assert_eq!(frame.body_len, 100);
     }
 }
