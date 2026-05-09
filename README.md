@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `parameter_binding` | INT/VARCHAR/TIMESTAMP 参数绑定 (INSERT/UPDATE/DELETE/SELECT) |
 | `join_queries` | LEFT JOIN / 三表 JOIN / 聚合 / 子查询 / EXISTS |
 | `data_types` | INT/VARCHAR/TIMESTAMP/NULL/COUNT/复合主键类型覆盖 |
+| `real_param_binding` | 真正的 execute_with_params 参数绑定 (INT/VARCHAR/TIMESTAMP) |
 
 ## 运行示例
 
