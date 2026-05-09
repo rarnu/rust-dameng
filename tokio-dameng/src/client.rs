@@ -324,6 +324,22 @@ impl Client {
         stream.write_all(data).await?;
         Ok(())
     }
+
+    /// Gracefully close the connection to the server.
+    ///
+    /// Sends a CLOSE message to release server resources,
+    /// then shuts down the TCP connection.
+    pub async fn close(&mut self) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Ok(());
+        }
+        let close = CloseMessage;
+        let payload = close.encode_payload();
+        let _ = self.write_all(&build_message(CLOSE, self.handle, &payload)).await;
+        let _ = self.read_message().await;
+        self.state = State::Closed;
+        Ok(())
+    }
 }
 
 impl Drop for Client {

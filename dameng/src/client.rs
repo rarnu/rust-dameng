@@ -416,10 +416,29 @@ impl Client {
         }
         Ok(())
     }
+
+    /// Gracefully close the connection to the server.
+    ///
+    /// Sends a CLOSE message to release server resources,
+    /// then shuts down the TCP connection.
+    pub fn close(&mut self) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Ok(());
+        }
+        let close = CloseMessage;
+        let payload = close.encode_payload();
+        let _ = self.write_all(&build_message(CLOSE, self.handle, &payload));
+        let _ = self.read_message();
+        self.state = State::Closed;
+        Ok(())
+    }
 }
 
 impl Drop for Client {
     fn drop(&mut self) {
+        if matches!(self.state, State::Ready) {
+            let _ = self.close();
+        }
         if let Some(stream) = self.stream.take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
