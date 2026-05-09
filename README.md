@@ -82,6 +82,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 - **事务支持**: BEGIN/COMMIT/ROLLBACK
 - **Query API**: sqlx 风格的 query()/fetch_all()/fetch_one() API
 
+## 示例列表
+
+| 示例 | 描述 |
+|------|------|
+| `basic_query` | 同步客户端基础查询 |
+| `async_query` | 异步客户端 + Query API |
+| `crud` | 完整 CRUD + 事务 (BEGIN/COMMIT/ROLLBACK) |
+| `parameter_binding` | INT/VARCHAR/TIMESTAMP 参数绑定 (INSERT/UPDATE/DELETE/SELECT) |
+| `join_queries` | LEFT JOIN / 三表 JOIN / 聚合 / 子查询 / EXISTS |
+| `data_types` | INT/VARCHAR/TIMESTAMP/NULL/COUNT/复合主键类型覆盖 |
+
 ## 运行示例
 
 ```bash
@@ -95,6 +106,9 @@ export DM_PASS=SYSDBA
 cargo run --package dameng --example basic_query
 cargo run --package dameng --example async_query
 cargo run --package dameng --example crud
+cargo run --package dameng --example parameter_binding
+cargo run --package dameng --example join_queries
+cargo run --package dameng --example data_types
 ```
 
 ## 运行测试
