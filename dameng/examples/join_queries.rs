@@ -52,9 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // LEFT JOIN: sample LEFT JOIN sample_detail
     println!("=== LEFT JOIN: sample + sample_detail ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
-         FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
-         ORDER BY S.ID",
+        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID ORDER BY S.ID",
     )?;
     println!(
         "  Columns: {:?}",
@@ -64,47 +62,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
-        let addr = row.get_str(1).ok().unwrap_or_default();
-        let phone = row.get_str(2).ok().unwrap_or_default();
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
+        let addr = if row.is_null(2) {
+            "NULL".to_string()
+        } else {
+            row.get_str(2)?
+        };
+        let phone = if row.is_null(3) {
+            "NULL".to_string()
+        } else {
+            row.get_str(3)?
+        };
         println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
     }
 
     // LEFT JOIN with WHERE parameter: filter by sample.id
     println!("\n=== LEFT JOIN with WHERE id = 1 ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
-         FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
-         WHERE S.ID = 1",
+        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID WHERE S.ID = 1",
     )?;
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
-        let addr = row.get_str(1).ok().unwrap_or_default();
-        let phone = row.get_str(2).ok().unwrap_or_default();
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
+        let addr = row.get_str(2)?;
+        let phone = row.get_str(3)?;
         println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
     }
 
     // LEFT JOIN: sample LEFT JOIN sample_detail WHERE id = 3 (no detail record)
     println!("\n=== LEFT JOIN with WHERE id = 3 (missing detail) ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
-         FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
-         WHERE S.ID = 3",
+        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID WHERE S.ID = 3",
     )?;
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
-        let addr = if row.is_null(1) {
-            String::from("NULL")
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
+        let addr = if row.is_null(2) {
+            "NULL".to_string()
         } else {
-            row.get_str(1).ok().unwrap_or_default()
+            row.get_str(2)?
         };
-        let phone = if row.is_null(2) {
-            String::from("NULL")
+        let phone = if row.is_null(3) {
+            "NULL".to_string()
         } else {
-            row.get_str(2).ok().unwrap_or_default()
+            row.get_str(3)?
         };
         println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
     }
@@ -112,11 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // THREE-table JOIN: sample + sample_detail + sample_item
     println!("\n=== THREE-table JOIN: sample + sample_detail + sample_item ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME, SD.ADDRESS, SI.ITEM_NAME, SI.BUY_TIME \
-         FROM SAMPLE S \
-         LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
-         LEFT JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID \
-         ORDER BY S.ID, SI.ITEM_ID",
+        "SELECT S.ID, S.NAME, SD.ADDRESS, SI.ITEM_NAME, TO_CHAR(SI.BUY_TIME, 'YYYY-MM-DD HH24:MI:SS') AS BUY_TIME FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID LEFT JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID ORDER BY S.ID, SI.ITEM_ID",
     )?;
     println!(
         "  Columns: {:?}",
@@ -126,11 +124,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
-        let addr = row.get_str(1).ok().unwrap_or_default();
-        let item = row.get_str(2).ok().unwrap_or_default();
-        let time = row.get_str(3).ok().unwrap_or_default();
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
+        let addr = if row.is_null(2) {
+            "NULL".to_string()
+        } else {
+            row.get_str(2)?
+        };
+        let item = if row.is_null(3) {
+            "NULL".to_string()
+        } else {
+            row.get_str(3)?
+        };
+        let time = if row.is_null(4) {
+            "NULL".to_string()
+        } else {
+            row.get_str(4)?
+        };
         println!(
             "  ID={}, NAME={}, ADDRESS={}, ITEM={}, BUY_TIME={}",
             id, name, addr, item, time
@@ -140,10 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Aggregation: COUNT items per sample
     println!("\n=== Aggregation: COUNT items per sample ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME, COUNT(SI.ITEM_ID) AS ITEM_COUNT \
-         FROM SAMPLE S LEFT JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID \
-         GROUP BY S.ID, S.NAME \
-         ORDER BY S.ID",
+        "SELECT S.ID, S.NAME, COUNT(SI.ITEM_ID) AS ITEM_COUNT FROM SAMPLE S LEFT JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID GROUP BY S.ID, S.NAME ORDER BY S.ID",
     )?;
     println!(
         "  Columns: {:?}",
@@ -153,42 +160,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .collect::<Vec<_>>()
     );
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
-        let count = row.get_i32(1).ok().map(|v| format!("{}", v)).unwrap_or_default();
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
+        let count = row.get_i32(2)?;
         println!("  ID={}, NAME={}, ITEM_COUNT={}", id, name, count);
     }
 
     // Subquery: samples with items bought after a certain date
     println!("\n=== Subquery: samples with recent purchases ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME \
-         FROM SAMPLE S \
-         WHERE S.ID IN (\
-             SELECT DISTINCT SI.SAMPLE_ID FROM SAMPLE_ITEM SI \
-             WHERE SI.BUY_TIME >= '2024-02-01 00:00:00'\
-         ) \
-         ORDER BY S.ID",
+        "SELECT S.ID, S.NAME FROM SAMPLE S WHERE S.ID IN (SELECT DISTINCT SI.SAMPLE_ID FROM SAMPLE_ITEM SI WHERE SI.BUY_TIME >= '2024-02-01 00:00:00') ORDER BY S.ID",
     )?;
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
         println!("  ID={}, NAME={}", id, name);
     }
 
     // EXISTS subquery: samples that have detail records
     println!("\n=== EXISTS: samples with detail records ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME \
-         FROM SAMPLE S \
-         WHERE EXISTS (\
-             SELECT 1 FROM SAMPLE_DETAIL SD WHERE SD.ID = S.ID\
-         ) \
-         ORDER BY S.ID",
+        "SELECT S.ID, S.NAME FROM SAMPLE S WHERE EXISTS (SELECT 1 FROM SAMPLE_DETAIL SD WHERE SD.ID = S.ID) ORDER BY S.ID",
     )?;
     for row in rs.iter() {
-        let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
+        let id = row.get_i32(0)?;
+        let name = row.get_str(1)?;
         println!("  ID={}, NAME={}", id, name);
     }
 

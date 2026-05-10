@@ -21,10 +21,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut client = dameng::Client::new(&host, port);
     client.connect(&user, &pass)?;
-    println!("Connected!\n");
+    println!("Connected!");
 
     // Prepare
-    println!("=== Preparing test data ===");
+    println!("\n=== Preparing test data ===");
     let _ = client.execute("DELETE FROM sample_item WHERE sample_id IN (1, 2, 3)");
     let _ = client.execute("DELETE FROM sample_detail WHERE id IN (1, 2, 3)");
     let _ = client.execute("DELETE FROM sample WHERE id IN (1, 2, 3)");
@@ -49,13 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.execute(
         "INSERT INTO sample_item (SAMPLE_ID, ITEM_ID, ITEM_NAME, BUY_TIME) VALUES (2, 201, 'Monitor', '2024-03-10 09:00:00')",
     )?;
-    println!("Data prepared.\n");
+    println!("Data prepared.");
 
     // 1. INT type - column metadata + row value
-    println!("=== INT type (sample.ID) ===");
+    println!("\n=== INT type (sample.ID) ===");
     let rs = client.query("SELECT ID FROM SAMPLE WHERE ID = 1")?;
-    println!("  Column: {} (type_code={}, type_name={})",
-        rs.columns[0].name, rs.columns[0].type_code, rs.columns[0].type_name);
+    println!(
+        "  Column: {} (type_code={}, type_name={})",
+        rs.columns[0].name, rs.columns[0].type_code, rs.columns[0].type_name
+    );
     for row in rs.iter() {
         let id = row.get_i32(0)?;
         println!("  Value: {}", id);
@@ -63,9 +65,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. VARCHAR type
     println!("\n=== VARCHAR type (sample.NAME, sample_detail.ADDRESS) ===");
-    let rs = client.query("SELECT S.NAME, SD.ADDRESS FROM SAMPLE S JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID WHERE S.ID = 1")?;
-    println!("  Columns: {:?}",
-        rs.columns.iter().map(|c| format!("{}({},{})", c.name, c.type_code, c.type_name)).collect::<Vec<_>>());
+    let rs = client.query(
+        "SELECT S.NAME, SD.ADDRESS FROM SAMPLE S JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID WHERE S.ID = 1",
+    )?;
+    println!(
+        "  Columns: {:?}",
+        rs.columns
+            .iter()
+            .map(|c| format!("{}({},{})", c.name, c.type_code, c.type_name))
+            .collect::<Vec<_>>()
+    );
     for row in rs.iter() {
         let name = row.get_str(0)?;
         let addr = row.get_str(1)?;
@@ -74,9 +83,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. TIMESTAMP type - stored as string from protocol
     println!("\n=== TIMESTAMP type (sample_item.BUY_TIME) ===");
-    let rs = client.query("SELECT ITEM_NAME, BUY_TIME FROM SAMPLE_ITEM WHERE SAMPLE_ID = 1 ORDER BY BUY_TIME")?;
-    println!("  Columns: {:?}",
-        rs.columns.iter().map(|c| format!("{}({},{})", c.name, c.type_code, c.type_name)).collect::<Vec<_>>());
+    let rs = client.query(
+        "SELECT ITEM_NAME, BUY_TIME FROM SAMPLE_ITEM WHERE SAMPLE_ID = 1 ORDER BY BUY_TIME",
+    )?;
+    println!(
+        "  Columns: {:?}",
+        rs.columns
+            .iter()
+            .map(|c| format!("{}({},{})", c.name, c.type_code, c.type_name))
+            .collect::<Vec<_>>()
+    );
     for row in rs.iter() {
         let item = row.get_str(0)?;
         let time = row.get_str(1)?;
@@ -86,25 +102,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. NULL handling - LEFT JOIN produces NULLs
     println!("\n=== NULL handling (LEFT JOIN with missing detail) ===");
     let rs = client.query(
-        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \\
-         FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \\
-         WHERE S.ID = 3",
+        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID WHERE S.ID = 3",
     )?;
     for row in rs.iter() {
         let id = row.get_i32(0)?;
-        let name = row.get_str(0)?;
+        let name = row.get_str(1)?;
         println!("  ID={}, NAME={}", id, name);
-        println!("    ADDRESS is_null={}, PHONE is_null={}", row.is_null(1), row.is_null(2));
-        let addr = if row.is_null(1) { "NULL".to_string() } else { row.get_str(1).ok().unwrap_or_default() };
-        let phone = if row.is_null(2) { "NULL".to_string() } else { row.get_str(2).ok().unwrap_or_default() };
+        println!(
+            "    ADDRESS is_null={}, PHONE is_null={}",
+            row.is_null(2),
+            row.is_null(3)
+        );
+        let addr = if row.is_null(2) {
+            "NULL".to_string()
+        } else {
+            row.get_str(2).ok().unwrap_or_default()
+        };
+        let phone = if row.is_null(3) {
+            "NULL".to_string()
+        } else {
+            row.get_str(3).ok().unwrap_or_default()
+        };
         println!("    ADDRESS={}, PHONE={}", addr, phone);
     }
 
     // 5. COUNT (aggregate) returns INT/BIGINT
     println!("\n=== COUNT aggregate ===");
     let rs = client.query("SELECT COUNT(*) AS TOTAL FROM SAMPLE")?;
-    println!("  Column: {} (type_code={}, type_name={})",
-        rs.columns[0].name, rs.columns[0].type_code, rs.columns[0].type_name);
+    println!(
+        "  Column: {} (type_code={}, type_name={})",
+        rs.columns[0].name, rs.columns[0].type_code, rs.columns[0].type_name
+    );
     for row in rs.iter() {
         let total = row.get_i32(0)?;
         println!("  COUNT(*) = {}", total);
@@ -112,9 +140,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 6. Composite key (multi-column PK) - sample_item
     println!("\n=== Composite PK (sample_item: SAMPLE_ID + ITEM_ID) ===");
-    let rs = client.query("SELECT SAMPLE_ID, ITEM_ID, ITEM_NAME FROM SAMPLE_ITEM ORDER BY SAMPLE_ID, ITEM_ID")?;
-    println!("  Columns: {:?}",
-        rs.columns.iter().map(|c| format!("{}({})", c.name, c.type_name)).collect::<Vec<_>>());
+    let rs = client.query(
+        "SELECT SAMPLE_ID, ITEM_ID, ITEM_NAME FROM SAMPLE_ITEM ORDER BY SAMPLE_ID, ITEM_ID",
+    )?;
+    println!(
+        "  Columns: {:?}",
+        rs.columns
+            .iter()
+            .map(|c| format!("{}({})", c.name, c.type_name))
+            .collect::<Vec<_>>()
+    );
     for row in rs.iter() {
         let sid = row.get_i32(0)?;
         let iid = row.get_i32(1)?;
@@ -125,12 +160,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 7. Multi-column result with mixed types
     println!("\n=== Mixed types (INT + VARCHAR + TIMESTAMP) ===");
     let rs = client.query(
-        "SELECT SI.SAMPLE_ID, S.NAME, SI.ITEM_NAME, SI.BUY_TIME \\
-         FROM SAMPLE_ITEM SI JOIN SAMPLE S ON SI.SAMPLE_ID = S.ID \\
-         ORDER BY SI.SAMPLE_ID, SI.ITEM_ID",
+        "SELECT SI.SAMPLE_ID, S.NAME, SI.ITEM_NAME, TO_CHAR(SI.BUY_TIME, 'YYYY-MM-DD HH24:MI:SS') AS BUY_TIME FROM SAMPLE_ITEM SI JOIN SAMPLE S ON SI.SAMPLE_ID = S.ID ORDER BY SI.SAMPLE_ID, SI.ITEM_ID",
     )?;
-    println!("  Columns: {:?}",
-        rs.columns.iter().map(|c| format!("{}({},{})", c.name, c.type_code, c.type_name)).collect::<Vec<_>>());
+    println!(
+        "  Columns: {:?}",
+        rs.columns
+            .iter()
+            .map(|c| format!("{}({},{})", c.name, c.type_code, c.type_name))
+            .collect::<Vec<_>>()
+    );
     for row in rs.iter() {
         let sid = row.get_i32(0)?;
         let name = row.get_str(1)?;
@@ -141,7 +179,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 8. Row value length
     println!("\n=== Row column count ===");
-    let rs = client.query("SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE, SI.ITEM_NAME FROM SAMPLE S JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID")?;
+    let rs = client.query(
+        "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE, SI.ITEM_NAME FROM SAMPLE S JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID",
+    )?;
     for row in rs.iter() {
         println!("  Row has {} columns", row.len());
         assert!(!row.is_empty());
