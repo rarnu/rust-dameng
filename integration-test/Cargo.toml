@@ -20,6 +20,8 @@ path = "src/bin/debug_version.rs"
 name = "trace_parser"
 path = "src/bin/trace_parser.rs"
 
+[[bin]]
+
 [dependencies]
 dameng-protocol = { path = "../dameng-protocol" }
 dameng-types = { path = "../dameng-types" }
