@@ -227,6 +227,17 @@ impl ExecResponse {
         let _reserved = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let header_row_count = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
 
+        // If data is too short for first column header, treat as empty result
+        // This can happen with BIND (type 13) responses for certain queries
+        if data.len() < 32 {
+            return Ok(ExecResponse {
+                col_count: 0,
+                row_count: 0,
+                columns: vec![],
+                rows: vec![],
+            });
+        }
+
         // === First Column Header (16 bytes, offset 16) ===
         let first_col_type = i32::from_le_bytes([data[16], data[17], data[18], data[19]]);
         let first_nullable = u16::from_le_bytes([data[20], data[21]]);
