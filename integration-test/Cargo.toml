@@ -8,30 +8,6 @@ description = "Integration tests against live DM instance"
 name = "dm-integration-test"
 path = "src/main.rs"
 
-[[bin]]
-name = "debug_version_ope"
-path = "src/bin/debug_version_ope.rs"
-
-[[bin]]
-name = "debug_version"
-path = "src/bin/debug_version.rs"
-
-[[bin]]
-name = "trace_parser"
-path = "src/bin/trace_parser.rs"
-
-[[bin]]
-name = "debug_full_protocol"
-path = "src/bin/debug_full_protocol.rs"
-
-[[bin]]
-name = "debug_library"
-path = "src/bin/debug_library.rs"
-
-[[bin]]
-name = "debug_stmt_fetch"
-path = "src/bin/debug_stmt_fetch.rs"
-
 [dependencies]
 dameng-protocol = { path = "../dameng-protocol" }
 dameng-types = { path = "../dameng-types" }
