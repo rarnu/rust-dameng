@@ -49,6 +49,124 @@ impl ExecMessage {
     }
 }
 
+/// Client->Server EXEC message for PREPARE (type 5).
+///
+/// This matches the Go driver's full 64-byte header format used for
+/// preparing statements with parameters. The server parses this to
+/// extract parameter metadata before the BIND step.
+///
+/// Wire format (64-byte header + SQL text):
+/// ```text
+/// Offset  Size  Field
+/// 0       4     stmt_id (i32 LE)
+/// 4       2     param_count (i16 LE)
+/// 6       4     sql_length (i32 LE) - byte length of SQL
+/// 10      10    reserved (zeros)
+/// 20      1     auto_commit (u8)
+/// 21      1     has_result_set (u8)
+/// 22      1     reserved (u8)
+/// 23      1     exec_flag (u8) = 1
+/// 24      1     reserved (u8)
+/// 25      2     exec_type (i16 LE) = 0
+/// 27      8     max_rows (i64 LE)
+/// 35      1     bdta_flag (u8)
+/// 36      2     reserved (i16 LE)
+/// 38      1     result_set_flag (u8) = 1
+/// 39      1     reserved (u8)
+/// 40      1     reserved (u8)
+/// 41      4     query_timeout (i32 LE)
+/// 45      1     inner_exec (u8)
+/// 46      1     bind_options (u8) - MsgVersion >= 8
+/// 47      2     reserved (zeros)
+/// 49      15    reserved (zeros)
+/// 64      N     SQL text (encoding depends on server)
+/// ```
+#[derive(Debug, Clone)]
+pub struct PrepareMessage {
+    /// Statement handle ID.
+    pub stmt_id: u32,
+    /// Number of parameter placeholders in the SQL.
+    pub param_count: u16,
+    /// The SQL string.
+    pub sql: String,
+    /// Whether this returns a result set (SELECT).
+    pub has_result_set: bool,
+    /// Auto-commit mode.
+    pub auto_commit: bool,
+}
+
+impl PrepareMessage {
+    /// Create a new PREPARE message.
+    pub fn new(stmt_id: u32, sql: &str, param_count: u16, has_result_set: bool) -> Self {
+        Self {
+            stmt_id,
+            param_count,
+            sql: sql.to_string(),
+            has_result_set,
+            auto_commit: true,
+        }
+    }
+
+    /// Encode to payload bytes (64-byte header + SQL).
+    pub fn encode_payload(&self) -> BytesMut {
+        let mut buf = BytesMut::new();
+
+        // 0-3: stmt_id
+        buf.put_u32_le(self.stmt_id);
+        // 4-5: param_count
+        buf.put_u16_le(self.param_count);
+        // 6-9: sql_length (byte length)
+        buf.put_u32_le(self.sql.len() as u32);
+        // 10-19: reserved (10 zeros)
+        for _ in 0..10 {
+            buf.put_u8(0);
+        }
+        // 20: auto_commit
+        buf.put_u8(if self.auto_commit { 1 } else { 0 });
+        // 21: has_result_set
+        buf.put_u8(if self.has_result_set { 1 } else { 0 });
+        // 22: reserved
+        buf.put_u8(0);
+        // 23: exec_flag
+        buf.put_u8(1);
+        // 24: reserved
+        buf.put_u8(0);
+        // 25-26: exec_type (i16 LE) = 0
+        buf.put_i16_le(0);
+        // 27-34: max_rows (i64 LE) = INT64_MAX (unlimited)
+        buf.put_i64_le(i64::MAX);
+        // 35: bdta_flag
+        buf.put_u8(0);
+        // 36-37: reserved (i16 LE)
+        buf.put_i16_le(0);
+        // 38: result_set_flag
+        buf.put_u8(1);
+        // 39: reserved
+        buf.put_u8(0);
+        // 40: reserved
+        buf.put_u8(0);
+        // 41-44: query_timeout (i32 LE)
+        buf.put_i32_le(0);
+        // 45: inner_exec
+        buf.put_u8(0);
+        // 46: bind_options
+        buf.put_u8(0);
+        // 47-63: reserved (17 zeros)
+        for _ in 0..17 {
+            buf.put_u8(0);
+        }
+
+        // 64+: SQL text as UTF-8 with length prefix (4-byte LE) + null terminator
+        // Matches Go driver's Dm_build_1419 format: length + bytes + null
+        let sql_bytes = self.sql.as_bytes();
+        buf.put_u32_le(sql_bytes.len() as u32); // sql_length (byte count)
+        buf.put_slice(sql_bytes);
+        buf.put_u8(0); // null terminator
+
+        buf
+    }
+}
+
 /// Client->Server EXEC message v2 (type 5).
 ///
 /// Full Go driver-compatible format. Supports:
@@ -121,6 +239,10 @@ impl ExecMessageV2 {
     }
 
     /// Encode to payload bytes (v2 format with UTF-16 SQL).
+    ///
+    /// NOTE: For EXEC(5) with stmt_id (PREPARE), the server expects UTF-8
+    /// encoded SQL, NOT UTF-16. Use `encode_payload_utf8()` for that case.
+    /// This UTF-16 format is used for OPTIMIZED_PREPARE_EXEC(91) only.
     pub fn encode_payload(&self) -> BytesMut {
         let mut buf = BytesMut::new();
 
@@ -132,9 +254,9 @@ impl ExecMessageV2 {
 
         // Execution options
         buf.put_i64_le(self.max_rows); // max_rows
-        buf.put_u8(0);                 // bdta flag
-        buf.put_i32_le(self.timeout);  // timeout
-        buf.put_u16_le(0);             // bind_options
+        buf.put_u8(0); // bdta flag
+        buf.put_i32_le(self.timeout); // timeout
+        buf.put_u16_le(0); // bind_options
 
         // SQL as UTF-16 LE
         let sql_utf16: Vec<u16> = self.sql.encode_utf16().collect();
@@ -142,6 +264,31 @@ impl ExecMessageV2 {
         for &ch in &sql_utf16 {
             buf.put_u16_le(ch);
         }
+
+        buf
+    }
+
+    /// Encode SQL as UTF-8 (for EXEC(5) PREPARE step matching Go driver).
+    pub fn encode_payload_utf8(&self) -> BytesMut {
+        let mut buf = BytesMut::new();
+
+        // Header
+        buf.put_u8(if self.auto_commit { 1 } else { 0 });
+        buf.put_u8(if self.has_result_set { 1 } else { 0 });
+        buf.put_u32_le(0); // reserved
+        buf.put_u16_le(0); // exec_type
+
+        // Execution options
+        buf.put_i64_le(self.max_rows); // max_rows
+        buf.put_u8(0); // bdta flag
+        buf.put_i32_le(self.timeout); // timeout
+        buf.put_u16_le(0); // bind_options
+
+        // SQL as UTF-8 with length prefix (4-byte LE) + null terminator
+        let sql_bytes = self.sql.as_bytes();
+        buf.put_u32_le(sql_bytes.len() as u32); // sql_length (byte count)
+        buf.put_slice(sql_bytes);
+        buf.put_u8(0); // null terminator
 
         buf
     }

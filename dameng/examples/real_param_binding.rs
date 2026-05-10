@@ -83,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rs = client.execute_with_params(0, sql, &params)?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
+        let name = row.get_str(1).ok().unwrap_or_default();
         println!("  ID={}, NAME={}", id, name);
     }
 
@@ -94,7 +94,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rs = client.execute_with_params(0, sql, &params)?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
+        let name = row.get_str(1).ok().unwrap_or_default();
         println!("  ID={}, NAME={}", id, name);
     }
 
@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rs = client.execute_with_params(0, sql, &params)?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
+        let name = row.get_str(1).ok().unwrap_or_default();
         println!("  Verified: ID={}, NAME={}", id, name);
     }
 
@@ -181,16 +181,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rs = client.execute_with_params(0, sql, &params)?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
-        let addr = if row.is_null(1) {
-            String::from("NULL")
-        } else {
-            row.get_str(1).ok().unwrap_or_default()
-        };
-        let phone = if row.is_null(2) {
+        let name = row.get_str(1).ok().unwrap_or_default();
+        let addr = if row.is_null(2) {
             String::from("NULL")
         } else {
             row.get_str(2).ok().unwrap_or_default()
+        };
+        let phone = if row.is_null(3) {
+            String::from("NULL")
+        } else {
+            row.get_str(3).ok().unwrap_or_default()
         };
         println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
     }

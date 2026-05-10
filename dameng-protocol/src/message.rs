@@ -60,8 +60,10 @@ pub mod msg_type {
     pub const COMMIT: u8 = 8;
     /// ROLLBACK - Rollback transaction (client->server)
     pub const ROLLBACK: u8 = 9;
-    /// BIND - Bind parameters and execute (client->server)
+    /// BIND - Legacy bind parameters and execute (client->server)
     pub const BIND: u8 = 13;
+    /// BIND_EXEC2 - Bind parameters and execute with EXEC2 protocol (client->server)
+    pub const BIND_EXEC2: u8 = 90;
     /// CLOSE - Close statement (client->server)
     pub const CLOSE: u8 = 20;
     /// STATEMENT_SET_CURSOR - Set cursor position for a statement (client->server)

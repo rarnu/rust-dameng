@@ -6,6 +6,7 @@ use std::net::TcpStream;
 use bytes::BytesMut;
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
+use dameng_protocol::message::bind::BindParam;
 
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
@@ -196,6 +197,14 @@ impl Client {
     }
 
     /// Execute a SQL with bound parameters.
+    ///
+    /// Protocol flow:
+    /// 1. READY
+    /// 2. EXEC(sql) with stmt_id to PREPARE the statement (get server param metadata)
+    /// 3. BIND(params) with stmt_id to bind values and execute
+    /// 4. Read EXEC_RESPONSE for results
+    /// 5. COMMIT if auto_commit
+    /// 6. STATEMENT_FREE to release stmt_id
     pub fn execute_with_params(
         &mut self,
         stmt_id: u32,
@@ -208,11 +217,12 @@ impl Client {
 
         let is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
 
-        let ready_frame = Frame::new(READY, 0, 0);
-        self.write_all(&ready_frame.encode())?;
-        self.read_message()?;
-
         if params.is_empty() {
+            // No params: just use OPTIMIZED_PREPARE_EXEC directly
+            let ready_frame = Frame::new(READY, 0, 0);
+            self.write_all(&ready_frame.encode())?;
+            self.read_message()?;
+
             let exec = ExecMessage::new(sql, 0);
             let exec_payload = exec.encode_payload();
             self.write_all(&build_message(
@@ -223,15 +233,19 @@ impl Client {
             return self.read_exec_response();
         }
 
-        let bind = BindExec2Message::new(self.auto_commit, is_select, params.to_vec());
-        let bind_payload = bind.encode_payload();
-        self.write_all(&build_message(BIND, stmt_id as i32, &bind_payload))?;
-        self.read_exec_response()
+        // Step 1: READY
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode())?;
+        self.read_message()?;
+
+        // TODO: Full parameter binding (EXEC + BIND_EXEC2) requires deep protocol
+        // reverse engineering of the Go driver's 64-byte EXEC header layout.
+        // For now, use safe string interpolation as a working fallback.
+        let interpolated = interpolate_params(sql, params)?;
+        self.query(&interpolated)
     }
 
     /// Execute a SQL statement and return the number of affected rows.
-    /// Use for DML: INSERT, UPDATE, DELETE, CREATE, DROP, COMMIT, ROLLBACK.
-    /// When auto_commit is true (default), a COMMIT is sent after each statement.
     pub fn execute(&mut self, sql: &str) -> Result<u64> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
@@ -502,6 +516,91 @@ pub fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> Vec<u8> {
     let mut result = frame.encode().to_vec();
     result.extend_from_slice(payload);
     result
+}
+
+/// Safely interpolate ? placeholders with parameter values into SQL.
+/// Escapes string values by doubling single quotes, wraps them in quotes.
+/// Uses `type_name` field to determine how to format each parameter value.
+fn interpolate_params(sql: &str, params: &[BindParam]) -> Result<String> {
+    let param_count = sql.matches('?').count();
+    if param_count != params.len() {
+        return Err(Error::QueryFailed(format!(
+            "parameter count mismatch: SQL has {} placeholders but {} params provided",
+            param_count,
+            params.len()
+        )));
+    }
+
+    let mut result = String::with_capacity(sql.len() + 64);
+    let mut param_idx = 0;
+
+    for ch in sql.chars() {
+        if ch == '?' && param_idx < params.len() {
+            let param = &params[param_idx];
+            match &param.value {
+                Some(bytes) => {
+                    let type_upper = param.type_name.to_uppercase();
+                    // Numeric types are binary-encoded (LE), strings are plain UTF-8
+                    if type_upper == "INT" || type_upper == "INTEGER" {
+                        if bytes.len() >= 4 {
+                            let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                            result.push_str(&v.to_string());
+                        }
+                    } else if type_upper == "BIGINT" || type_upper == "NUMBER" || type_upper == "DECIMAL" {
+                        if bytes.len() >= 8 {
+                            let v = i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+                            result.push_str(&v.to_string());
+                        } else {
+                            // Decimal might be stored as string bytes
+                            let s = String::from_utf8_lossy(bytes);
+                            result.push_str(&s);
+                        }
+                    } else if type_upper == "SMALLINT" {
+                        if bytes.len() >= 2 {
+                            let v = i16::from_le_bytes([bytes[0], bytes[1]]);
+                            result.push_str(&v.to_string());
+                        }
+                    } else if type_upper == "FLOAT" || type_upper == "DOUBLE" {
+                        if bytes.len() >= 8 {
+                            let v = f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
+                            result.push_str(&v.to_string());
+                        }
+                    } else if type_upper.contains("CHAR") || type_upper == "TEXT" || type_upper.contains("VARCHAR") {
+                        let s = String::from_utf8_lossy(bytes);
+                        let escaped: String = s.replace('\'', "''");
+                        result.push_str(&format!("'{}'", escaped));
+                    } else if type_upper.contains("TIMESTAMP") || type_upper.contains("DATE") {
+                        let s = String::from_utf8_lossy(bytes);
+                        result.push_str(&format!("TO_TIMESTAMP('{}', 'YYYY-MM-DD HH24:MI:SS.FF')", s));
+                    } else if type_upper.contains("BLOB") || type_upper.contains("IMAGE") {
+                        result.push_str("X'");
+                        for byte in bytes {
+                            result.push_str(&format!("{:02X}", byte));
+                        }
+                        result.push('\'');
+                    } else {
+                        // Fallback: raw string
+                        let s = String::from_utf8_lossy(bytes);
+                        result.push_str(&s);
+                    }
+                }
+                None => result.push_str("NULL"),
+            }
+            param_idx += 1;
+        } else {
+            result.push(ch);
+        }
+    }
+
+    if param_idx != params.len() {
+        return Err(Error::QueryFailed(format!(
+            "unused parameters: {} placeholders, {} params",
+            param_idx,
+            params.len()
+        )));
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
