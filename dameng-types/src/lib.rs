@@ -267,7 +267,59 @@ pub fn decode_value(ty: DmValueType, data: &[u8]) -> Option<DmValue> {
             Some(DmValue::TinyInt(data[0] as i8))
         }
         DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP | DmValueType::INTERVAL => {
-            String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
+            // DM stores DATE/TIME/TIMESTAMP/INTERVAL as binary:
+            // DATE: 7 bytes (year:2, month:1, day:1, hour:1, min:1, sec:1)
+            // TIME: 6 bytes (hour:1, min:1, sec:1, nanosec:4)
+            // TIMESTAMP: 11 bytes (year:2, month:1, day:1, hour:1, min:1, sec:1, nanosec:4)
+            // If data is text (string), pass through; otherwise decode binary.
+            match String::from_utf8(data.to_vec()) {
+                Ok(s) => Some(DmValue::Text(s)),
+                Err(_) => {
+                    // Try binary decode for TIMESTAMP (11 bytes)
+                    if ty == DmValueType::TIMESTAMP && data.len() >= 11 {
+                        let year = u16::from_be_bytes([data[0], data[1]]) as i32;
+                        let month = data[2];
+                        let day = data[3];
+                        let hour = data[4];
+                        let minute = data[5];
+                        let second = data[6];
+                        let nano = u32::from_be_bytes([data[7], data[8], data[9], data[10]]);
+                        let s = if nano > 0 {
+                            format!(
+                                "{}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
+                                year, month, day, hour, minute, second, nano
+                            )
+                        } else {
+                            format!(
+                                "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                                year, month, day, hour, minute, second
+                            )
+                        };
+                        Some(DmValue::Text(s))
+                    } else if ty == DmValueType::DATE && data.len() >= 7 {
+                        let year = u16::from_be_bytes([data[0], data[1]]) as i32;
+                        let month = data[2];
+                        let day = data[3];
+                        let hour = data[4];
+                        let minute = data[5];
+                        let second = data[6];
+                        let s = format!(
+                            "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                            year, month, day, hour, minute, second
+                        );
+                        Some(DmValue::Text(s))
+                    } else if ty == DmValueType::TIME && data.len() >= 6 {
+                        let hour = data[0];
+                        let minute = data[1];
+                        let second = data[2];
+                        let s = format!("{:02}:{:02}:{:02}", hour, minute, second);
+                        Some(DmValue::Text(s))
+                    } else {
+                        // Fallback: try as UTF-8 lossy
+                        Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))
+                    }
+                }
+            }
         }
     }
 }

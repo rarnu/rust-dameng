@@ -154,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sid = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let iid = row.get_i32(1).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(2).ok().unwrap_or_default();
-        let time = row.get_str(3).ok().unwrap_or_default();
+        let time = row.get_timestamp(3).ok().unwrap_or_default();
         println!("  SAMPLE_ID={}, ITEM_ID={}, ITEM_NAME={}, BUY_TIME={}", sid, iid, name, time);
     }
 

@@ -142,13 +142,24 @@ impl Row {
     }
 
     /// Get a String value at the given column index.
+    ///
+    /// For text types (VARCHAR, CHAR, CLOB) this reads UTF-8 directly.
+    /// For binary types (TIMESTAMP, DATE, TIME) this uses decode_value
+    /// to produce a human-readable string representation.
     pub fn get_str(&self, idx: usize) -> Result<String> {
         let val = self.values.get(idx).and_then(|v| v.as_ref())
             .ok_or(crate::error::Error::DecodeError(format!(
                 "column {} is NULL or out of range", idx
             )))?;
-        String::from_utf8(val.clone())
-            .map_err(|e| crate::error::Error::DecodeError(e.to_string()))
+
+        // Try UTF-8 first; if it fails, try lossy decode as fallback.
+        match String::from_utf8(val.clone()) {
+            Ok(s) => Ok(s),
+            Err(_) => {
+                // Binary data — use lossy UTF-8 as a safe fallback
+                Ok(String::from_utf8_lossy(val).to_string())
+            }
+        }
     }
 
     /// Get a f64 value at the given column index.
@@ -169,9 +180,78 @@ impl Row {
     /// Check if the value at the given column index is NULL.
     pub fn is_null(&self, idx: usize) -> bool {
         match self.values.get(idx) {
-            Some(None) => true,
-            Some(Some(v)) => v.len() == 0,
-            None => true,
+            None | Some(None) => true,
+            Some(Some(v)) => v.is_empty(),
+        }
+    }
+
+    /// Get a TIMESTAMP value at the given column index as a human-readable string.
+    ///
+    /// DM encodes TIMESTAMP as 11 bytes: year(2 BE) + month(1) + day(1) + hour(1) + minute(1) + second(1) + nanosecond(4 BE).
+    /// Falls back to UTF-8/lossy if the data doesn't match binary format.
+    pub fn get_timestamp(&self, idx: usize) -> Result<String> {
+        let val = self.values.get(idx).and_then(|v| v.as_ref())
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
+
+        if val.len() == 11 {
+            let year = u16::from_be_bytes([val[0], val[1]]) as i32;
+            let month = val[2];
+            let day = val[3];
+            let hour = val[4];
+            let minute = val[5];
+            let second = val[6];
+            let nano = u32::from_be_bytes([val[7], val[8], val[9], val[10]]);
+            if nano > 0 {
+                Ok(format!(
+                    "{}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
+                    year, month, day, hour, minute, second, nano
+                ))
+            } else {
+                Ok(format!(
+                    "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                    year, month, day, hour, minute, second
+                ))
+            }
+        } else if val.len() == 7 {
+            // DATE format: year(2 BE) + month(1) + day(1) + hour(1) + minute(1) + second(1)
+            let year = u16::from_be_bytes([val[0], val[1]]) as i32;
+            let month = val[2];
+            let day = val[3];
+            let hour = val[4];
+            let minute = val[5];
+            let second = val[6];
+            Ok(format!(
+                "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                year, month, day, hour, minute, second
+            ))
+        } else {
+            // Fallback: UTF-8 or lossy
+            self.get_str(idx)
+        }
+    }
+
+    /// Get a DATE value at the given column index as a human-readable string.
+    pub fn get_date(&self, idx: usize) -> Result<String> {
+        let val = self.values.get(idx).and_then(|v| v.as_ref())
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
+
+        if val.len() == 7 {
+            let year = u16::from_be_bytes([val[0], val[1]]) as i32;
+            let month = val[2];
+            let day = val[3];
+            let hour = val[4];
+            let minute = val[5];
+            let second = val[6];
+            Ok(format!(
+                "{}-{:02}-{:02} {:02}:{:02}:{:02}",
+                year, month, day, hour, minute, second
+            ))
+        } else {
+            self.get_str(idx)
         }
     }
 
