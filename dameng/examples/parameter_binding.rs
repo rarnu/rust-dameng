@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT with INT parameter
     println!("\n=== SELECT sample WHERE id = ? ===");
-    let rs = client.execute("SELECT ID, NAME FROM SAMPLE WHERE ID = 1")?;
+    let rs = client.query("SELECT ID, NAME FROM SAMPLE WHERE ID = 1")?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(0).ok().unwrap_or_default();
@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT with VARCHAR parameter
     println!("\n=== SELECT sample WHERE name = ? ===");
-    let rs = client.execute("SELECT ID, NAME FROM SAMPLE WHERE NAME = 'Bob'")?;
+    let rs = client.query("SELECT ID, NAME FROM SAMPLE WHERE NAME = 'Bob'")?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(0).ok().unwrap_or_default();
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.execute(
         "UPDATE sample SET NAME = 'Alice Updated' WHERE ID = 1",
     )?;
-    let rs = client.execute("SELECT NAME FROM SAMPLE WHERE ID = 1")?;
+    let rs = client.query("SELECT NAME FROM SAMPLE WHERE ID = 1")?;
     for row in rs.iter() {
         let name = row.get_str(0).ok().unwrap_or_default();
         println!("  Updated name: {}", name);
@@ -95,7 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     client.execute(
         "UPDATE sample_detail SET ADDRESS = 'Beijing 789', PHONE = '13811111111' WHERE ID = 1",
     )?;
-    let rs = client.execute(
+    println!("\n=== SELECT ADDRESS, PHONE FROM SAMPLE_DETAIL WHERE ID = ? ===");
+    let rs = client.query(
         "SELECT ADDRESS, PHONE FROM SAMPLE_DETAIL WHERE ID = 1",
     )?;
     for row in rs.iter() {
@@ -106,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT with TIMESTAMP parameter (>= comparison)
     println!("\n=== SELECT sample_item WHERE buy_time >= ? ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT SAMPLE_ID, ITEM_ID, ITEM_NAME, BUY_TIME FROM SAMPLE_ITEM WHERE BUY_TIME >= '2024-02-01 00:00:00' ORDER BY BUY_TIME",
     )?;
     println!(
@@ -124,7 +125,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // DELETE with INT parameter
     println!("\n=== DELETE sample_item WHERE sample_id = ? ===");
     client.execute("DELETE FROM sample_item WHERE SAMPLE_ID = 2 AND ITEM_ID = 201")?;
-    let rs = client.execute("SELECT COUNT(*) FROM SAMPLE_ITEM")?;
+    let rs = client.query("SELECT COUNT(*) FROM SAMPLE_ITEM")?;
     for row in rs.iter() {
         let count = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         println!("  Remaining items: {}", count);

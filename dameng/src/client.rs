@@ -120,10 +120,17 @@ impl Client {
             .map_err(|e| Error::Protocol(e))
     }
 
-    /// Begin a new transaction by disabling auto-commit.
+    /// Begin a new transaction by first committing any pending changes,
+    /// then disabling auto-commit on the client side.
+    /// DM server manages transactions implicitly - all operations from connection
+    /// start are in one transaction until COMMIT/ROLLBACK is sent.
     pub fn begin(&mut self) -> Result<()> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
+        }
+        // Commit any pending changes before starting a new transaction
+        if self.auto_commit {
+            self.do_commit()?;
         }
         self.auto_commit = false;
         Ok(())
@@ -222,22 +229,56 @@ impl Client {
         self.read_exec_response()
     }
 
-    /// Execute a SQL statement without parameters.
-    pub fn execute(&mut self, sql: &str) -> Result<ResultSet> {
+    /// Execute a SQL statement and return the number of affected rows.
+    /// Use for DML: INSERT, UPDATE, DELETE, CREATE, DROP, COMMIT, ROLLBACK.
+    /// When auto_commit is true (default), a COMMIT is sent after each statement.
+    pub fn execute(&mut self, sql: &str) -> Result<u64> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
 
-        // Send READY with empty payload before EXEC (required by server)
         let ready_frame = Frame::new(READY, 0, 0);
         self.write_all(&ready_frame.encode())?;
-        self.read_message()?; // consume ACK
+        self.read_message()?;
 
-        // Send OPTIMIZED_PREPARE_EXEC (type 91) - returns inline row data
         let exec = ExecMessage::new(sql, 0);
         let exec_payload = exec.encode_payload();
         self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
-        self.read_exec_response()
+
+        let (frame, payload) = self.read_message()?;
+        if frame.response_code < 0 {
+            let msg = String::from_utf8_lossy(&payload);
+            return Err(Error::QueryFailed(format!("{}: {}", frame.response_code, msg)));
+        }
+
+        // DM server doesn't auto-commit by default. When auto_commit is true,
+        // send a COMMIT after each statement to match the expected behavior.
+        if self.auto_commit {
+            self.do_commit()?;
+        }
+
+        Ok(0)
+    }
+
+    /// Internal commit - sends the COMMIT protocol message.
+    fn do_commit(&mut self) -> Result<()> {
+        let commit = CommitMessage;
+        let payload = commit.encode_payload();
+        self.write_all(&build_message(COMMIT, self.handle, &payload))?;
+        let (frame, _payload) = self.read_message()?;
+        if frame.msg_type != ACK && frame.msg_type != EXEC_RESPONSE {
+            return Err(Error::ConnectionFailed(format!(
+                "expected ACK/EXEC_RESPONSE for COMMIT got msg_type={}",
+                frame.msg_type
+            )));
+        }
+        if frame.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "COMMIT failed with resp_code={}",
+                frame.response_code
+            )));
+        }
+        Ok(())
     }
 
     /// Read an EXEC_RESPONSE and parse into Rows.
@@ -281,6 +322,23 @@ impl Client {
         }
     }
 
+    /// Execute a SQL SELECT query and return the result set.
+    pub fn query(&mut self, sql: &str) -> Result<ResultSet> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode())?;
+        self.read_message()?;
+
+        // Use OPE(91) for SELECT — returns ACK with inline EXEC_RESPONSE data
+        let exec = ExecMessage::new(sql, 0);
+        let exec_payload = exec.encode_payload();
+        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
+        self.read_exec_response()
+    }
+
     /// Send a READY keepalive and read the ACK.
     pub fn ready(&mut self) -> Result<()> {
         if !matches!(self.state, State::Ready) {
@@ -299,29 +357,17 @@ impl Client {
         Ok(())
     }
 
-    /// Commit the current transaction.
+    /// Commit the current transaction and re-enable auto-commit.
     pub fn commit(&mut self) -> Result<()> {
-        let commit = CommitMessage;
-        let payload = commit.encode_payload();
-        self.write_all(&build_message(COMMIT, self.handle, &payload))?;
-        let (frame, _payload) = self.read_message()?;
-        // Server may return EXEC_RESPONSE (0) with success message instead of ACK (187)
-        if frame.msg_type != ACK && frame.msg_type != EXEC_RESPONSE {
-            return Err(Error::ConnectionFailed(format!(
-                "expected ACK/EXEC_RESPONSE for COMMIT got msg_type={}",
-                frame.msg_type
-            )));
-        }
-        if frame.response_code < 0 {
-            return Err(Error::ConnectionFailed(format!(
-                "COMMIT failed with resp_code={}",
-                frame.response_code
-            )));
-        }
+        self.do_commit()?;
+        self.auto_commit = true;
+        // COMMIT may also invalidate the server-side statement handle.
+        // Reset to 0 so the next execute() will allocate a fresh one.
+        self.handle = 0;
         Ok(())
     }
 
-    /// Rollback the current transaction.
+    /// Rollback the current transaction and re-enable auto-commit.
     pub fn rollback(&mut self) -> Result<()> {
         let rollback = RollbackMessage;
         let payload = rollback.encode_payload();
@@ -339,6 +385,10 @@ impl Client {
                 frame.response_code
             )));
         }
+        self.auto_commit = true;
+        // ROLLBACK invalidates the server-side statement handle (-2106).
+        // Reset to 0 so the next execute() will allocate a fresh one.
+        self.handle = 0;
         Ok(())
     }
 

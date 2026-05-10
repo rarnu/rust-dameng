@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // LEFT JOIN: sample LEFT JOIN sample_detail
     println!("=== LEFT JOIN: sample + sample_detail ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
          FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
          ORDER BY S.ID",
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // LEFT JOIN with WHERE parameter: filter by sample.id
     println!("\n=== LEFT JOIN with WHERE id = 1 ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
          FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
          WHERE S.ID = 1",
@@ -88,7 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // LEFT JOIN: sample LEFT JOIN sample_detail WHERE id = 3 (no detail record)
     println!("\n=== LEFT JOIN with WHERE id = 3 (missing detail) ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
          FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
          WHERE S.ID = 3",
@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // THREE-table JOIN: sample + sample_detail + sample_item
     println!("\n=== THREE-table JOIN: sample + sample_detail + sample_item ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME, SD.ADDRESS, SI.ITEM_NAME, SI.BUY_TIME \
          FROM SAMPLE S \
          LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Aggregation: COUNT items per sample
     println!("\n=== Aggregation: COUNT items per sample ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME, COUNT(SI.ITEM_ID) AS ITEM_COUNT \
          FROM SAMPLE S LEFT JOIN SAMPLE_ITEM SI ON S.ID = SI.SAMPLE_ID \
          GROUP BY S.ID, S.NAME \
@@ -161,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Subquery: samples with items bought after a certain date
     println!("\n=== Subquery: samples with recent purchases ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME \
          FROM SAMPLE S \
          WHERE S.ID IN (\
@@ -178,7 +178,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // EXISTS subquery: samples that have detail records
     println!("\n=== EXISTS: samples with detail records ===");
-    let rs = client.execute(
+    let rs = client.query(
         "SELECT S.ID, S.NAME \
          FROM SAMPLE S \
          WHERE EXISTS (\

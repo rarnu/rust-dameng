@@ -18,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT 1
     println!("=== SELECT 1 ===");
-    let rs = client.execute("SELECT 1")?;
+    let rs = client.query("SELECT 1")?;
     for row in rs.iter() {
         if let Ok(val) = row.get_i32(0) {
             println!("  Result: {}", val);
@@ -27,7 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT from V$VERSION
     println!("\n=== V$VERSION ===");
-    let rs = client.execute("SELECT * FROM V$VERSION")?;
+    let rs = client.query("SELECT * FROM V$VERSION")?;
     for row in rs.iter() {
         if let Ok(ver) = row.get_str(0) {
             println!("  {}", ver);
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // SELECT from SAMPLE table
     println!("\n=== SELECT FROM SAMPLE ===");
-    let rs = client.execute("SELECT ID, NAME FROM SAMPLE ORDER BY ID")?;
+    let rs = client.query("SELECT ID, NAME FROM SAMPLE ORDER BY ID")?;
     println!("  Columns: {:?}", rs.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();

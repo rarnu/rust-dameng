@@ -14,7 +14,7 @@ fn main() {
 
     // Execute SELECT 1 FROM DUAL
     println!("\n=== SELECT 1 FROM DUAL ===");
-    match client.execute("SELECT 1 FROM DUAL") {
+    match client.query("SELECT 1 FROM DUAL") {
         Ok(rows) => {
             println!("OK: Got {} row(s)", rows.len());
             for (i, row) in rows.iter().enumerate() {

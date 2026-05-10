@@ -94,7 +94,7 @@ impl<'a> Query<'a> {
     /// Execute the query and fetch all rows.
     pub async fn fetch_all(self) -> Result<ResultSet> {
         if self.params.is_empty() {
-            self.client.execute(&self.sql).await
+            self.client.query(&self.sql).await
         } else {
             self.client.execute_with_params(0, &self.sql, &self.params).await
         }

@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Deleted: SAMPLE_ID=10");
 
     // Verify deletion
-    let rs = client.execute("SELECT COUNT(*) FROM SAMPLE_ITEM WHERE SAMPLE_ID = 10")?;
+    let rs = client.query("SELECT COUNT(*) FROM SAMPLE_ITEM WHERE SAMPLE_ID = 10")?;
     for row in rs.iter() {
         let count = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         println!("  Remaining: {}", count);

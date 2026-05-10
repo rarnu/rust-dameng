@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Connected!\n");
 
     println!("=== SELECT 1 ===");
-    let rs = client.execute("SELECT 1").await?;
+    let rs = client.query("SELECT 1").await?;
     for row in &rs.rows {
         if let Ok(val) = row.get_i32(0) {
             println!("  Result: {}", val);
@@ -26,7 +26,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== V$VERSION ===");
-    let rs = client.execute("SELECT * FROM V$VERSION").await?;
+    let rs = client.query("SELECT * FROM V$VERSION").await?;
     for row in &rs.rows {
         if let Ok(ver) = row.get_str(0) {
             println!("  {}", ver);
@@ -34,8 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== Query API ===");
-    use tokio_dameng::QueryBuilderExt;
-    let rs = client.query("SELECT 42 AS ANSWER").fetch_all().await?;
+    let rs = client.query("SELECT 42 AS ANSWER").await?;
     for row in &rs.rows {
         if let Ok(val) = row.get_i32(0) {
             println!("  ANSWER: {}", val);
@@ -43,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== SELECT FROM SAMPLE ===");
-    let rs = client.execute("SELECT ID, NAME FROM SAMPLE ORDER BY ID").await?;
+    let rs = client.query("SELECT ID, NAME FROM SAMPLE ORDER BY ID").await?;
     println!("  Columns: {:?}", rs.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
     for row in &rs.rows {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();

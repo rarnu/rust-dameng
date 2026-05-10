@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Inserted 3 rows.\n");
 
     println!("=== SELECT ===");
-    let rs = client.execute("SELECT ID, NAME, AGE FROM EXAMPLE_USERS ORDER BY ID")?;
+    let rs = client.query("SELECT ID, NAME, AGE FROM EXAMPLE_USERS ORDER BY ID")?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(0).ok().unwrap_or_default();
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n=== UPDATE ===");
     client.execute("UPDATE EXAMPLE_USERS SET AGE = 26 WHERE NAME = 'Alice'")?;
-    let rs = client.execute("SELECT AGE FROM EXAMPLE_USERS WHERE NAME = 'Alice'")?;
+    let rs = client.query("SELECT AGE FROM EXAMPLE_USERS WHERE NAME = 'Alice'")?;
     if let Some(row) = rs.first() {
         if let Ok(age) = row.get_i32(0) {
             println!("  Alice's new age: {}", age);
@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Transaction (ROLLBACK) ===");
     client.execute("INSERT INTO EXAMPLE_USERS (ID, NAME, AGE) VALUES (100, 'Temp', 99)")?;
     client.rollback()?;
-    let rs = client.execute("SELECT COUNT(*) FROM EXAMPLE_USERS")?;
+    let rs = client.query("SELECT COUNT(*) FROM EXAMPLE_USERS")?;
     if let Some(row) = rs.first() {
         if let Ok(count) = row.get_i32(0) {
             println!("  After rollback: {} rows", count);
@@ -61,7 +61,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Transaction (COMMIT) ===");
     client.execute("DELETE FROM EXAMPLE_USERS WHERE ID = 3")?;
     client.commit()?;
-    let rs = client.execute("SELECT COUNT(*) FROM EXAMPLE_USERS")?;
+    let rs = client.query("SELECT COUNT(*) FROM EXAMPLE_USERS")?;
     if let Some(row) = rs.first() {
         if let Ok(count) = row.get_i32(0) {
             println!("  After commit: {} rows", count);
