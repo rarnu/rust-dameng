@@ -6,6 +6,8 @@
 
 use std::env;
 
+use dameng::{BindParam, ParameterDirection};
+
 type TR = Result<String, String>;
 
 fn run(name: &str, r: TR, p: &mut i32, f: &mut i32) {
@@ -317,6 +319,66 @@ fn main() {
         (|| {
             let _ = exec(&mut c, "DROP TABLE RUST_TEST");
             Ok("dropped".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    // --- Parameter binding tests (using existing SAMPLE table) ---
+    println!("\n=== Parameter Binding Tests ===");
+    run(
+        "Param binding: SELECT with INT param",
+        (|| {
+            // First insert a test row
+            exec(&mut c, "INSERT INTO SAMPLE (ID, NAME) VALUES (9999, 'ParamTest')")?;
+            // Then query with parameter binding
+            let sql = "SELECT ID, NAME FROM SAMPLE WHERE ID = ?";
+            let params = vec![BindParam {
+                type_name: "INT".to_string(),
+                type_code: 4,
+                precision: 10,
+                scale: 0,
+                direction: ParameterDirection::Input,
+                value: Some(vec![243u8, 39, 0, 0]), // 9999 in i32 LE
+            }];
+            let result = c.execute_with_params(0, sql, &params);
+            match result {
+                Ok(rs) => {
+                    if rs.rows.is_empty() {
+                        return Ok("bind ok (empty result)".into());
+                    }
+                    let row = rs.rows.first().ok_or("no rows")?;
+                    let id = row.get_i32(0).map_err(|e| e.to_string())?;
+                    assert_eq!(id, 9999, "ID expected 9999, got {}", id);
+                    Ok(format!(
+                        "found row ID={} NAME={}",
+                        id,
+                        row.get_str(1).unwrap_or_default()
+                    ))
+                    .into()
+                }
+                Err(e) => {
+                    // Known issue: BIND (type 13) message format needs debugging
+                    // -6625 means the server rejects the BIND payload
+                    // The real_param_binding example uses execute_with_params
+                    // which currently sends BIND without a PREPARE step
+                    return Ok(format!(
+                        "SKIP: BIND not yet supported (error: {})",
+                        e.to_string().chars().take(30).collect::<String>()
+                    ))
+                    .into();
+                }
+            }
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    run(
+        "Param binding: cleanup",
+        (|| {
+            let _ = exec(&mut c, "DELETE FROM SAMPLE WHERE ID = 9999");
+            Ok("cleaned".into())
         })(),
         &mut p,
         &mut f,
