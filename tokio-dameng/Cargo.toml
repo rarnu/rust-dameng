@@ -11,3 +11,4 @@ dameng-types = { path = "../dameng-types" }
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
+deadpool-runtime = { version = "0.1", features = ["tokio"] }
