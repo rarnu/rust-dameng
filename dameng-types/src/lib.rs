@@ -354,8 +354,24 @@ pub fn decode_value(ty: DmValueType, data: &[u8]) -> Option<DmValue> {
                         let hour = data[0];
                         let minute = data[1];
                         let second = data[2];
-                        let s = format!("{:02}:{:02}:{:02}", hour, minute, second);
+                        let nano = if data.len() >= 10 {
+                            u32::from_be_bytes([data[3], data[4], data[5], data[6]])
+                        } else {
+                            0
+                        };
+                        let s = if nano > 0 {
+                            format!(
+                                "{:02}:{:02}:{:02}.{:09}",
+                                hour, minute, second, nano
+                            )
+                        } else {
+                            format!("{:02}:{:02}:{:02}", hour, minute, second)
+                        };
                         Some(DmValue::Text(s))
+                    } else if ty == DmValueType::INTERVAL {
+                        // INTERVAL: decode as text representation
+                        // DM stores INTERVAL as binary or text; fallback to lossy UTF-8
+                        Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))
                     } else {
                         // Fallback: try as UTF-8 lossy
                         Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))

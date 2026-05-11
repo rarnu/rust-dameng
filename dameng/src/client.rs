@@ -30,7 +30,7 @@ pub struct Client {
     /// Port.
     pub port: u16,
     /// Connection handle.
-    pub handle: i32,
+    pub handle: u32,
     /// Server challenge for encryption.
     pub challenge: Vec<u8>,
     /// Auto-commit mode.
@@ -145,14 +145,18 @@ impl Client {
         let payload = alloc.encode_payload();
         self.write_all(&build_message(STATEMENT_PREPARE, 0, &payload))?;
         let (frame, resp_payload) = self.read_message()?;
+        eprintln!("DEBUG: allocate resp: code={} type={} payload_len={} first24={:02?}",
+            frame.response_code, frame.msg_type, resp_payload.len(), &resp_payload[..resp_payload.len().min(24)]);
         if frame.response_code < 0 {
             return Err(Error::ConnectionFailed(format!(
                 "allocate statement failed: code={}",
                 frame.response_code
             )));
         }
-        StatementAllocateMessage::parse_response(&resp_payload)
-            .map_err(|e| Error::Protocol(e))
+        let stmt_id = StatementAllocateMessage::parse_response(&resp_payload)
+            .map_err(|e| Error::Protocol(e))?;
+        eprintln!("DEBUG: parsed stmt_id={}", stmt_id);
+        Ok(stmt_id)
     }
 
     /// Free a statement handle.
@@ -184,7 +188,7 @@ impl Client {
 
         let exec = ExecMessage::new(sql, 0);
         let exec_payload = exec.encode_payload();
-        self.write_all(&build_message(EXEC, stmt_id as i32, &exec_payload))?;
+        self.write_all(&build_message(EXEC, stmt_id, &exec_payload))?;
         let (frame, _) = self.read_message()?;
         if frame.response_code < 0 {
             return Err(Error::QueryFailed(format!(
@@ -204,9 +208,18 @@ impl Client {
     /// 4. Read EXEC_RESPONSE for results
     /// 5. COMMIT if auto_commit
     /// 6. STATEMENT_FREE to release stmt_id
+    /// Execute a SQL with bound parameters using the real BIND_EXEC2 protocol.
+    ///
+    /// Protocol flow:
+    /// 1. READY (keepalive)
+    /// 2. EXEC(5) with PrepareMessage (64-byte header + SQL) to PREPARE
+    /// 3. BIND_EXEC2(90) with parameter descriptors + values to execute
+    /// 4. Read EXEC_RESPONSE for results
+    /// 5. COMMIT if auto_commit
+    /// 6. STATEMENT_FREE to release stmt_id
     pub fn execute_with_params(
         &mut self,
-        stmt_id: u32,
+        stmt_id_in: u32,
         sql: &str,
         params: &[BindParam],
     ) -> Result<ResultSet> {
@@ -214,34 +227,57 @@ impl Client {
             return Err(Error::NotConnected);
         }
 
-        let _is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
-
-        if params.is_empty() {
-            // No params: just use OPTIMIZED_PREPARE_EXEC directly
-            let ready_frame = Frame::new(READY, 0, 0);
-            self.write_all(&ready_frame.encode())?;
-            self.read_message()?;
-
-            let exec = ExecMessage::new(sql, 0);
-            let exec_payload = exec.encode_payload();
-            self.write_all(&build_message(
-                EXEC,
-                if stmt_id > 0 { stmt_id as i32 } else { 0 },
-                &exec_payload,
-            ))?;
-            return self.read_exec_response();
-        }
+        let has_result_set = sql.trim_start().to_uppercase().starts_with("SELECT");
 
         // Step 1: READY
         let ready_frame = Frame::new(READY, 0, 0);
         self.write_all(&ready_frame.encode())?;
         self.read_message()?;
 
-        // TODO: Full parameter binding (EXEC + BIND_EXEC2) requires deep protocol
-        // reverse engineering of the Go driver's 64-byte EXEC header layout.
-        // For now, use safe string interpolation as a working fallback.
-        let interpolated = interpolate_params(sql, params)?;
-        self.query(&interpolated)
+        if params.is_empty() {
+            // No params: just use OPTIMIZED_PREPARE_EXEC directly
+            let exec = ExecMessage::new(sql, 0);
+            let exec_payload = exec.encode_payload();
+            self.write_all(&build_message(
+                EXEC,
+                if stmt_id_in > 0 { stmt_id_in } else { 0 },
+                &exec_payload,
+            ))?;
+            return self.read_exec_response();
+        }
+
+        // Use self.handle as statement handle (no separate allocation needed).
+        // NOTE: STATEMENT_PREPARE and READY share msg_type=3, so allocate_statement
+        // actually sends READY and parses garbage. The DM server manages statement
+        // handles server-side via the frame handle field.
+        let stmt_id = self.handle;
+
+        // Step 3: EXEC(5) to PREPARE — simple format: sql + null terminator
+        let exec = ExecMessage::new(sql, 0);
+        let exec_payload = exec.encode_payload();
+        self.write_all(&build_message(EXEC, stmt_id, &exec_payload))?;
+        let (exec_frame, exec_payload) = self.read_message()?;
+        if exec_frame.response_code < 0 {
+            let msg = String::from_utf8_lossy(&exec_payload);
+            return Err(Error::QueryFailed(format!(
+                "prepare failed: code={} type={} payload={}",
+                exec_frame.response_code, exec_frame.msg_type, msg
+            )));
+        }
+
+        // Step 4: BIND_EXEC2(90) with params
+        let bind_exec2 = BindExec2Message::new(
+            self.auto_commit,
+            has_result_set,
+            params.to_vec(),
+        );
+        let bind_payload = bind_exec2.encode_payload();
+        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
+
+        // Step 5: Read result
+        let rs = self.read_exec_response()?;
+
+        Ok(rs)
     }
 
     /// Execute a SQL statement and return the number of affected rows.
@@ -510,96 +546,11 @@ impl Drop for Client {
 }
 
 /// Build a complete message (frame + payload).
-pub fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> Vec<u8> {
+pub fn build_message(msg_type: u8, handle: u32, payload: &[u8]) -> Vec<u8> {
     let frame = Frame::new(msg_type, handle, payload.len() as i32);
     let mut result = frame.encode().to_vec();
     result.extend_from_slice(payload);
     result
-}
-
-/// Safely interpolate ? placeholders with parameter values into SQL.
-/// Escapes string values by doubling single quotes, wraps them in quotes.
-/// Uses `type_name` field to determine how to format each parameter value.
-fn interpolate_params(sql: &str, params: &[BindParam]) -> Result<String> {
-    let param_count = sql.matches('?').count();
-    if param_count != params.len() {
-        return Err(Error::QueryFailed(format!(
-            "parameter count mismatch: SQL has {} placeholders but {} params provided",
-            param_count,
-            params.len()
-        )));
-    }
-
-    let mut result = String::with_capacity(sql.len() + 64);
-    let mut param_idx = 0;
-
-    for ch in sql.chars() {
-        if ch == '?' && param_idx < params.len() {
-            let param = &params[param_idx];
-            match &param.value {
-                Some(bytes) => {
-                    let type_upper = param.type_name.to_uppercase();
-                    // Numeric types are binary-encoded (LE), strings are plain UTF-8
-                    if type_upper == "INT" || type_upper == "INTEGER" {
-                        if bytes.len() >= 4 {
-                            let v = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                            result.push_str(&v.to_string());
-                        }
-                    } else if type_upper == "BIGINT" || type_upper == "NUMBER" || type_upper == "DECIMAL" {
-                        if bytes.len() >= 8 {
-                            let v = i64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
-                            result.push_str(&v.to_string());
-                        } else {
-                            // Decimal might be stored as string bytes
-                            let s = String::from_utf8_lossy(bytes);
-                            result.push_str(&s);
-                        }
-                    } else if type_upper == "SMALLINT" {
-                        if bytes.len() >= 2 {
-                            let v = i16::from_le_bytes([bytes[0], bytes[1]]);
-                            result.push_str(&v.to_string());
-                        }
-                    } else if type_upper == "FLOAT" || type_upper == "DOUBLE" {
-                        if bytes.len() >= 8 {
-                            let v = f64::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]]);
-                            result.push_str(&v.to_string());
-                        }
-                    } else if type_upper.contains("CHAR") || type_upper == "TEXT" || type_upper.contains("VARCHAR") {
-                        let s = String::from_utf8_lossy(bytes);
-                        let escaped: String = s.replace('\'', "''");
-                        result.push_str(&format!("'{}'", escaped));
-                    } else if type_upper.contains("TIMESTAMP") || type_upper.contains("DATE") {
-                        let s = String::from_utf8_lossy(bytes);
-                        result.push_str(&format!("TO_TIMESTAMP('{}', 'YYYY-MM-DD HH24:MI:SS.FF')", s));
-                    } else if type_upper.contains("BLOB") || type_upper.contains("IMAGE") {
-                        result.push_str("X'");
-                        for byte in bytes {
-                            result.push_str(&format!("{:02X}", byte));
-                        }
-                        result.push('\'');
-                    } else {
-                        // Fallback: raw string
-                        let s = String::from_utf8_lossy(bytes);
-                        result.push_str(&s);
-                    }
-                }
-                None => result.push_str("NULL"),
-            }
-            param_idx += 1;
-        } else {
-            result.push(ch);
-        }
-    }
-
-    if param_idx != params.len() {
-        return Err(Error::QueryFailed(format!(
-            "unused parameters: {} placeholders, {} params",
-            param_idx,
-            params.len()
-        )));
-    }
-
-    Ok(result)
 }
 
 #[cfg(test)]

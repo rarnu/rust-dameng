@@ -329,9 +329,11 @@ fn main() {
     run(
         "Param binding: SELECT with INT param",
         (|| {
-            // First insert a test row
+            // Clean up first to avoid unique constraint conflicts
+            let _ = exec(&mut c, "DELETE FROM SAMPLE WHERE ID = 9999");
+            // Insert a test row
             exec(&mut c, "INSERT INTO SAMPLE (ID, NAME) VALUES (9999, 'ParamTest')")?;
-            // Then query with parameter binding
+            // Then query with parameter binding using real BIND_EXEC2 protocol
             let sql = "SELECT ID, NAME FROM SAMPLE WHERE ID = ?";
             let params = vec![BindParam {
                 type_name: "INT".to_string(),
@@ -364,7 +366,7 @@ fn main() {
                     // which currently sends BIND without a PREPARE step
                     return Ok(format!(
                         "SKIP: BIND not yet supported (error: {})",
-                        e.to_string().chars().take(30).collect::<String>()
+                        e.to_string().chars().take(200).collect::<String>()
                     ))
                     .into();
                 }

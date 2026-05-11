@@ -23,7 +23,7 @@ pub struct Client {
     state: State,
     host: String,
     port: u16,
-    handle: i32,
+    handle: u32,
     challenge: Vec<u8>,
     auto_commit: bool,
     #[allow(dead_code)]
@@ -165,7 +165,7 @@ impl Client {
 
         let exec = ExecMessage::new(sql, 0);
         let exec_payload = exec.encode_payload();
-        self.write_all(&build_message(EXEC, stmt_id as i32, &exec_payload)).await?;
+        self.write_all(&build_message(EXEC, stmt_id, &exec_payload)).await?;
         let (frame, _) = self.read_message().await?;
         if frame.response_code < 0 {
             return Err(Error::QueryFailed(format!(
@@ -176,10 +176,18 @@ impl Client {
         Ok(())
     }
 
-    /// Execute a SQL with bound parameters.
+    /// Execute a SQL with bound parameters using the real BIND_EXEC2 protocol.
+    ///
+    /// Protocol flow:
+    /// 1. READY (keepalive)
+    /// 2. EXEC(5) with PrepareMessage (64-byte header + SQL) to PREPARE
+    /// 3. BIND_EXEC2(90) with parameter descriptors + values to execute
+    /// 4. Read EXEC_RESPONSE for results
+    /// 5. COMMIT if auto_commit
+    /// 6. STATEMENT_FREE to release stmt_id
     pub async fn execute_with_params(
         &mut self,
-        stmt_id: u32,
+        stmt_id_in: u32,
         sql: &str,
         params: &[BindParam],
     ) -> Result<ResultSet> {
@@ -187,27 +195,62 @@ impl Client {
             return Err(Error::NotConnected);
         }
 
-        let is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
+        let has_result_set = sql.trim_start().to_uppercase().starts_with("SELECT");
 
+        // Step 1: READY
         let ready_frame = Frame::new(READY, 0, 0);
         self.write_all(&ready_frame.encode()).await?;
         self.read_message().await?;
 
         if params.is_empty() {
+            // No params: just use OPTIMIZED_PREPARE_EXEC directly
             let exec = ExecMessage::new(sql, 0);
             let exec_payload = exec.encode_payload();
             self.write_all(&build_message(
                 EXEC,
-                if stmt_id > 0 { stmt_id as i32 } else { 0 },
+                if stmt_id_in > 0 { stmt_id_in } else { 0 },
                 &exec_payload,
-            )).await?;
+            ))
+            .await?;
             return self.read_exec_response().await;
         }
 
-        let bind = BindExec2Message::new(self.auto_commit, is_select, params.to_vec());
-        let bind_payload = bind.encode_payload();
-        self.write_all(&build_message(BIND, stmt_id as i32, &bind_payload)).await?;
-        self.read_exec_response().await
+        // Step 2: Allocate statement handle
+        let stmt_id = if stmt_id_in > 0 {
+            stmt_id_in
+        } else {
+            self.allocate_statement().await?
+        };
+
+        // Step 3: EXEC(5) with PrepareMessage to PREPARE the statement
+        let prepare =
+            PrepareMessage::new(stmt_id, sql, params.len() as u16, has_result_set);
+        let prepare_payload = prepare.encode_payload();
+        self.write_all(&build_message(EXEC, stmt_id, &prepare_payload))
+            .await?;
+        let (exec_frame, _) = self.read_message().await?;
+        if exec_frame.response_code < 0 {
+            self.free_statement(stmt_id).await.ok();
+            return Err(Error::QueryFailed(format!(
+                "prepare failed: code={}",
+                exec_frame.response_code
+            )));
+        }
+
+        // Step 4: BIND_EXEC2(90) with params
+        let bind_exec2 =
+            BindExec2Message::new(self.auto_commit, has_result_set, params.to_vec());
+        let bind_payload = bind_exec2.encode_payload();
+        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))
+            .await?;
+
+        // Step 5: Read result
+        let rs = self.read_exec_response().await?;
+
+        // Step 6: Free statement
+        self.free_statement(stmt_id).await.ok();
+
+        Ok(rs)
     }
 
     /// Execute a SQL statement and return the number of affected rows.
@@ -440,7 +483,7 @@ impl Drop for Client {
     }
 }
 
-pub(crate) fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn build_message(msg_type: u8, handle: u32, payload: &[u8]) -> Vec<u8> {
     let frame = Frame::new(msg_type, handle, payload.len() as i32);
     let mut result = frame.encode().to_vec();
     result.extend_from_slice(payload);

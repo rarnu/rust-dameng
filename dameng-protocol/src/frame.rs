@@ -26,7 +26,7 @@ pub const FRAME_HEADER_SIZE: usize = 64;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
     /// Statement/connection handle.
-    pub handle: i32,
+    pub handle: u32,
     /// Message type identifier.
     pub msg_type: u8,
     /// Length of the payload following this header.
@@ -39,7 +39,7 @@ pub struct Frame {
 
 impl Frame {
     /// Create a new frame header for client messages.
-    pub fn new(msg_type: u8, handle: i32, body_len: i32) -> Self {
+    pub fn new(msg_type: u8, handle: u32, body_len: i32) -> Self {
         Self {
             handle,
             msg_type,
@@ -63,7 +63,7 @@ impl Frame {
             calc_xor ^= buf[i];
         }
 
-        let handle = buf.get_i32_le();
+        let handle = buf.get_u32_le();
         let msg_type = buf.get_u8();
         let _reserved = buf.get_u8();
         let body_len = buf.get_i32_le();
@@ -92,7 +92,7 @@ impl Frame {
     pub fn encode(&self) -> BytesMut {
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE);
 
-        buf.put_i32_le(self.handle);
+        buf.put_u32_le(self.handle);
         buf.put_u8(self.msg_type);
         buf.put_u8(0); // reserved
         buf.put_i32_le(self.body_len);

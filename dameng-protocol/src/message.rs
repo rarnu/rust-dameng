@@ -143,7 +143,7 @@ pub mod crypto {
 }
 
 /// Build a complete message (frame + payload) and return it as BytesMut.
-pub fn build_message(msg_type: u8, handle: i32, payload: &[u8]) -> BytesMut {
+pub fn build_message(msg_type: u8, handle: u32, payload: &[u8]) -> BytesMut {
     let frame = Frame::new(msg_type, handle, payload.len() as i32);
     let mut result = frame.encode();
     result.put_slice(payload);
