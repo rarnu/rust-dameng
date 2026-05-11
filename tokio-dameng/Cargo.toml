@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 dameng-protocol = { path = "../dameng-protocol" }
 dameng-types = { path = "../dameng-types" }
+dameng-macros = { path = "../dameng-macros" }
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"

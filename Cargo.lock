@@ -163,6 +163,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dameng-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "dameng-protocol"
 version = "0.1.0"
 dependencies = [
@@ -728,6 +737,7 @@ name = "tokio-dameng"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "dameng-macros",
  "dameng-protocol",
  "dameng-types",
  "log",

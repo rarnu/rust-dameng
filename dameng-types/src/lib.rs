@@ -121,6 +121,48 @@ pub enum DmValue {
     Decimal(rust_decimal::Decimal),
 }
 
+impl From<i32> for DmValue {
+    fn from(v: i32) -> Self {
+        DmValue::Int(v)
+    }
+}
+
+impl From<i64> for DmValue {
+    fn from(v: i64) -> Self {
+        DmValue::BigInt(v)
+    }
+}
+
+impl From<String> for DmValue {
+    fn from(v: String) -> Self {
+        DmValue::Text(v)
+    }
+}
+
+impl From<&str> for DmValue {
+    fn from(v: &str) -> Self {
+        DmValue::Text(v.to_string())
+    }
+}
+
+impl From<bool> for DmValue {
+    fn from(v: bool) -> Self {
+        DmValue::Boolean(v)
+    }
+}
+
+impl From<f64> for DmValue {
+    fn from(v: f64) -> Self {
+        DmValue::Double(v)
+    }
+}
+
+impl From<Vec<u8>> for DmValue {
+    fn from(v: Vec<u8>) -> Self {
+        DmValue::Bytea(v)
+    }
+}
+
 /// Encode a Rust value to DM protocol bytes.
 pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
     match ty {

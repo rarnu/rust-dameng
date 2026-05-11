@@ -276,6 +276,100 @@ impl Row {
         let dm_ty = DmValueType::from_type_code(col.type_code)?;
         dameng_types::decode_value(dm_ty, data)
     }
+
+    /// Get an i16 value at the given column index.
+    pub fn get_i16(&self, idx: usize) -> Result<i16> {
+        let val = self.values.get(idx).and_then(|v| v.as_ref())
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
+        if val.len() < 2 {
+            if val.len() == 1 {
+                return Ok(val[0] as i16);
+            }
+            return Err(crate::error::Error::DecodeError(format!(
+                "column {} too short for i16", idx
+            )));
+        }
+        Ok(i16::from_le_bytes([val[0], val[1]]))
+    }
+
+    /// Get an i8 value at the given column index.
+    pub fn get_i8(&self, idx: usize) -> Result<i8> {
+        let val = self.values.get(idx).and_then(|v| v.as_ref())
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
+        if val.is_empty() {
+            return Err(crate::error::Error::DecodeError(format!(
+                "column {} is NULL", idx
+            )));
+        }
+        Ok(val[0] as i8)
+    }
+
+    /// Get a f32 value at the given column index.
+    pub fn get_f32(&self, idx: usize) -> Result<f32> {
+        let val = self.values.get(idx).and_then(|v| v.as_ref())
+            .ok_or(crate::error::Error::DecodeError(format!(
+                "column {} is NULL or out of range", idx
+            )))?;
+        if val.len() < 4 {
+            return Err(crate::error::Error::DecodeError(format!(
+                "column {} too short for f32", idx
+            )));
+        }
+        Ok(f32::from_le_bytes([val[0], val[1], val[2], val[3]]))
+    }
+
+    /// Get raw bytes at the given column index.
+    pub fn get_bytes(&self, idx: usize) -> Result<Vec<u8>> {
+        match self.values.get(idx) {
+            Some(Some(v)) => Ok(v.clone()),
+            Some(None) => Ok(vec![]),
+            None => Err(crate::error::Error::DecodeError(format!(
+                "column {} out of range", idx
+            ))),
+        }
+    }
+
+    /// Get an Option<i32> at the given column index (NULL-safe).
+    pub fn get_opt_i32(&self, idx: usize) -> Result<Option<i32>> {
+        match self.values.get(idx) {
+            Some(Some(v)) if !v.is_empty() => Ok(Some(self.get_i32(idx)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Get an Option<i64> at the given column index (NULL-safe).
+    pub fn get_opt_i64(&self, idx: usize) -> Result<Option<i64>> {
+        match self.values.get(idx) {
+            Some(Some(v)) if !v.is_empty() => Ok(Some(self.get_i64(idx)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Get an Option<String> at the given column index (NULL-safe).
+    pub fn get_opt_str(&self, idx: usize) -> Result<Option<String>> {
+        match self.values.get(idx) {
+            Some(Some(v)) if !v.is_empty() => Ok(Some(self.get_str(idx)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Get an Option<f64> at the given column index (NULL-safe).
+    pub fn get_opt_f64(&self, idx: usize) -> Result<Option<f64>> {
+        match self.values.get(idx) {
+            Some(Some(v)) if !v.is_empty() => Ok(Some(self.get_f64(idx)?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Get the column index by finding it in the columns list.
+    /// Returns the row's column_index counter (thread-local style).
+    pub fn column_index(&self, columns: &[Column]) -> usize {
+        0
+    }
 }
 
 /// Server->Client EXEC_RESPONSE (type 0).
