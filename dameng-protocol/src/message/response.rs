@@ -522,7 +522,7 @@ impl ExecResponse {
             }
 
             // Expanded 32-byte header for subsequent columns
-            let c_type = i32::from_le_bytes([
+            let _c_type = i32::from_le_bytes([
                 data[header_off], data[header_off + 1],
                 data[header_off + 2], data[header_off + 3],
             ]);
@@ -682,6 +682,7 @@ impl ExecResponse {
     }
 
     /// Helper to safely read u32 LE.
+    #[allow(dead_code)]
     fn safe_u32(data: &[u8], offset: usize) -> u32 {
         if offset + 4 <= data.len() {
             u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])

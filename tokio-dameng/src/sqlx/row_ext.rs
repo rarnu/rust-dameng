@@ -1,6 +1,5 @@
 //! Row extension trait for extracting typed values by column name.
 
-use crate::error::Result;
 use dameng_protocol::{Column, Row};
 
 /// Extract typed values from a row by column name.

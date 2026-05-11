@@ -4,7 +4,10 @@
 
 pub use dameng_protocol::{Column, Row};
 
+#[cfg(test)]
 use dameng_types::DmValue;
+
+
 
 /// A query result set containing columns and rows.
 #[derive(Debug, Clone)]

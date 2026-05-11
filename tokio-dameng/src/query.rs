@@ -156,18 +156,21 @@ impl<'a> Query<'a> {
 /// Extension trait for Client to provide query() methods.
 pub trait QueryBuilderExt {
     /// Create a query builder for the given SQL.
-    fn query(&mut self, sql: &str) -> Query;
+    fn query(&mut self, sql: &str) -> Query<'_>;
+
 
     /// Create a query builder expecting a single scalar result.
-    fn query_scalar<T: Into<dameng_types::DmValue>>(&mut self, sql: &str, value: T) -> Query;
+    fn query_scalar<T: Into<dameng_types::DmValue>>(&mut self, sql: &str, value: T) -> Query<'_>;
+
 }
 
 impl QueryBuilderExt for Client {
-    fn query(&mut self, sql: &str) -> Query {
+    fn query(&mut self, sql: &str) -> Query<'_> {
+
         Query::new(self, sql)
     }
 
-    fn query_scalar<T>(&mut self, sql: &str, value: T) -> Query
+    fn query_scalar<T>(&mut self, sql: &str, value: T) -> Query<'_>
     where
         T: Into<dameng_types::DmValue>,
     {

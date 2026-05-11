@@ -10,7 +10,6 @@ use dameng_protocol::message::bind::BindParam;
 
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
-use dameng_protocol::{Column, Row};
 
 /// Connection state.
 #[derive(Debug, Clone, PartialEq)]
@@ -215,7 +214,7 @@ impl Client {
             return Err(Error::NotConnected);
         }
 
-        let is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
+        let _is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
 
         if params.is_empty() {
             // No params: just use OPTIMIZED_PREPARE_EXEC directly

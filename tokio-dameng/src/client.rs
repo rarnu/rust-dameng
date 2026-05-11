@@ -8,7 +8,7 @@ use tokio::net::TcpStream;
 
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
-use dameng_protocol::{Column, Row};
+use dameng_protocol::Row;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum State {
@@ -26,6 +26,7 @@ pub struct Client {
     handle: i32,
     challenge: Vec<u8>,
     auto_commit: bool,
+    #[allow(dead_code)]
     encoding: u8,
 }
 

@@ -6,7 +6,6 @@
 pub mod row_ext;
 
 pub use dameng_macros::FromRow;
-use row_ext::RowExt;
 
 /// Trait for decoding a database row into a Rust type.
 ///
