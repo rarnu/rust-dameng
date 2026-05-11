@@ -129,6 +129,20 @@ fn make_bind_param(value: dameng_types::DmValue) -> dameng_protocol::message::Bi
             direction: dameng_protocol::message::ParameterDirection::Input,
             value: Some(d.to_string().into_bytes()),
         },
+        dameng_types::DmValue::LobLocator(loc) => dameng_protocol::message::BindParam {
+            type_name: if loc.is_clob {
+                "CLOB".to_string()
+            } else {
+                "BLOB".to_string()
+            },
+            type_code: if loc.is_clob { 14 } else { 13 },
+            precision: 0,
+            scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            // LOB locator cannot be used as input parameter yet;
+            // pass raw bytes as a placeholder (LOB binding via LOBREAD needs full impl)
+            value: Some(loc.raw.to_vec()),
+        },
     }
 }
 

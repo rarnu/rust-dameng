@@ -119,6 +119,64 @@ pub enum DmValue {
     Text(String),
     Bytea(Vec<u8>),
     Decimal(rust_decimal::Decimal),
+    /// LOB_LOCATOR: DM server returns a 16-byte locator handle when CLOB/BLOB
+    /// data exceeds 2048 bytes. The actual content must be fetched via LOBREAD
+    /// protocol messages. This variant stores the raw 16-byte locator.
+    LobLocator(LobLocator),
+}
+
+/// A LOB (Large Object) locator returned by the DM server.
+///
+/// When CLOB/BLOB data exceeds 2048 bytes, DM returns a 16-byte locator
+/// instead of the actual data. The locator contains server-side pointers
+/// (table ID, column ID, row ID, group/file/page numbers) that can be
+/// used with LOBREAD protocol messages to fetch the actual content.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LobLocator {
+    /// Raw 16-byte locator from DM server.
+    pub raw: [u8; 16],
+    /// Whether this is a CLOB (true) or BLOB (false).
+    pub is_clob: bool,
+}
+
+impl LobLocator {
+    /// Create a new LOB locator from raw bytes.
+    pub fn new(raw: [u8; 16], is_clob: bool) -> Self {
+        Self { raw, is_clob }
+    }
+
+    /// Check if this is an "in-row" locator (small data, embedded in row).
+    /// Go driver checks byte 0 against a flag byte to determine in-row vs out-row.
+    pub fn is_in_row(&self) -> bool {
+        // NBLOB_HEAD_IN_ROW_FLAG check: Go uses dm_build_1036(offset=0)
+        // In-row flag byte is compared against LOB_IN_ROW constant.
+        // Based on Go driver: inRow = byte[0] & flag == LOB_IN_ROW
+        // For now, 16-byte locators are always out-row by definition.
+        false
+    }
+
+    /// Get the blobId (8 bytes, big-endian) from the locator.
+    pub fn blob_id(&self) -> i64 {
+        // NBLOB_HEAD_BLOBID offset in Go driver
+        // Based on Go: blobId = Dm_build_1050(value, NBLOB_HEAD_BLOBID)
+        // 1050 reads 8 bytes (int64 LE)
+        let bytes: [u8; 8] = self.raw[0..8].try_into().unwrap();
+        i64::from_le_bytes(bytes)
+    }
+
+    /// Get the group ID (4 bytes) for out-row locators.
+    pub fn group_id(&self) -> i32 {
+        // NBLOB_HEAD_OUTROW_GROUPID offset
+        let bytes: [u8; 4] = self.raw[8..12].try_into().unwrap();
+        i32::from_le_bytes(bytes)
+    }
+
+    /// Get the file ID (4 bytes) for out-row locators.
+    pub fn file_id(&self) -> i32 {
+        // NBLOB_HEAD_OUTROW_FILEID offset
+        let bytes: [u8; 4] = self.raw[12..16].try_into().unwrap();
+        i32::from_le_bytes(bytes)
+    }
 }
 
 impl From<i32> for DmValue {
@@ -295,11 +353,29 @@ pub fn decode_value(ty: DmValueType, data: &[u8]) -> Option<DmValue> {
         DmValueType::BIT => {
             Some(DmValue::Boolean(data[0] != 0))
         }
-        DmValueType::VARCHAR | DmValueType::CHAR | DmValueType::CLOB => {
+        DmValueType::VARCHAR | DmValueType::CHAR => {
             String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
         }
-        DmValueType::BLOB | DmValueType::BINARY | DmValueType::VARBINARY => {
+        DmValueType::CLOB => {
+            // Check for LOB_LOCATOR (16 bytes) - large CLOB data
+            if data.len() == 16 {
+                let raw: [u8; 16] = data.try_into().ok()?;
+                Some(DmValue::LobLocator(LobLocator::new(raw, true)))
+            } else {
+                String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
+            }
+        }
+        DmValueType::BINARY | DmValueType::VARBINARY => {
             Some(DmValue::Bytea(data.to_vec()))
+        }
+        DmValueType::BLOB => {
+            // Check for LOB_LOCATOR (16 bytes) - large BLOB data
+            if data.len() == 16 {
+                let raw: [u8; 16] = data.try_into().ok()?;
+                Some(DmValue::LobLocator(LobLocator::new(raw, false)))
+            } else {
+                Some(DmValue::Bytea(data.to_vec()))
+            }
         }
         DmValueType::DECIMAL => {
             let s = String::from_utf8_lossy(data);
