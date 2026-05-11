@@ -1,8 +1,8 @@
 //! Async connection pool for tokio-dameng.
 //!
 //! Provides a simple, tokio-native connection pool without external pooling
-//! dependencies. Uses `Arc<TokioMutex<Vec<Client>>>` under the hood with
-//! a semaphore to limit concurrent connections.
+//! dependencies. Uses `std::sync::Mutex<Vec<Client>>` for idle pool management
+//! (since Drop is synchronous) with a `Semaphore` to limit concurrent connections.
 //!
 //! # Example
 //!
@@ -17,9 +17,9 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::sync::{Mutex as TokioMutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::time::{timeout, Duration};
 
 use crate::client::Client;
@@ -27,12 +27,12 @@ use crate::error::{Error, Result};
 
 /// A checked-out connection from the pool.
 ///
-/// Automatically releases the semaphore permit and returns the connection
-/// to the idle pool when dropped.
+/// Automatically returns the connection to the idle pool when dropped.
+/// The semaphore permit was forgotten (not auto-released) so we add it back in Drop.
 pub struct PooledConnection {
     conn: Option<Client>,
     semaphore: Arc<Semaphore>,
-    return_to_pool: Option<Arc<TokioMutex<Vec<Client>>>>,
+    return_to_pool: Option<Arc<StdMutex<Vec<Client>>>>,
 }
 
 impl PooledConnection {
@@ -69,16 +69,14 @@ impl PooledConnection {
 
 impl Drop for PooledConnection {
     fn drop(&mut self) {
-        // If we have a connection and a pool to return it to, put it back
+        // Return connection to idle pool (using std::sync::Mutex for sync Drop)
         if let Some(conn) = self.conn.take() {
             if let Some(return_to_pool) = self.return_to_pool.take() {
-                // blocking_lock is safe here because we're in Drop (sync context)
-                let mut idle = return_to_pool.blocking_lock();
+                let mut idle = return_to_pool.lock().unwrap_or_else(|e| e.into_inner());
                 idle.push(conn);
             }
-            // else: pool shut down, connection is dropped
         }
-        // Always release the semaphore permit
+        // Release the semaphore permit (we forgot the Permit in get(), so it wasn't auto-released)
         self.semaphore.add_permits(1);
     }
 }
@@ -121,14 +119,14 @@ pub struct Pool {
     user: String,
     pass: String,
     semaphore: Arc<Semaphore>,
-    idle: Arc<TokioMutex<Vec<Client>>>,
+    idle: Arc<StdMutex<Vec<Client>>>,
 }
 
 impl Pool {
     /// Create a new connection pool.
     pub fn new(host: &str, port: u16, user: &str, pass: &str, config: PoolConfig) -> Self {
         let semaphore = Arc::new(Semaphore::new(config.max_size));
-        let idle = Arc::new(TokioMutex::new(Vec::new()));
+        let idle = Arc::new(StdMutex::new(Vec::new()));
 
         Self {
             config,
@@ -147,28 +145,36 @@ impl Pool {
     /// Creates new connections up to `max_size` if needed.
     pub async fn get(&self) -> Result<PooledConnection> {
         // Acquire a semaphore permit (blocks if pool is full)
-        match timeout(self.config.wait_timeout, self.semaphore.acquire()).await {
-            Ok(Ok(_)) => (),
+        let permit = match timeout(self.config.wait_timeout, self.semaphore.acquire()).await {
+            Ok(Ok(p)) => p,
             Ok(Err(_)) => {
-                return Err(Error::ConnectionFailed("Semaphore acquire failed".to_string()))
+                return Err(Error::ConnectionFailed("Semaphore acquire failed".to_string()));
             }
-            Err(_) => return Err(Error::ConnectionFailed("Pool acquire timeout".to_string())),
-        }
+            Err(_) => {
+                return Err(Error::ConnectionFailed("Pool acquire timeout".to_string()));
+            }
+        };
 
-        // Try to get an idle connection
-        {
-            let mut idle = self.idle.lock().await;
-            if let Some(mut conn) = idle.pop() {
-                // Check if connection is still healthy
-                if conn.query("SELECT 1 FROM DUAL").await.is_ok() {
-                    return Ok(PooledConnection {
-                        conn: Some(conn),
-                        semaphore: self.semaphore.clone(),
-                        return_to_pool: Some(self.idle.clone()),
-                    });
-                }
-                // Connection is dead, fall through to create new one
+        // Forget the permit so it doesn't auto-release when dropped at end of this function.
+        // We will manually add_permits(1) in PooledConnection::Drop instead.
+        std::mem::forget(permit);
+
+        // Try to get an idle connection - drop guard before any await
+        let mut idle_conn = {
+            let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+            idle.pop()
+        };
+
+        if let Some(mut conn) = idle_conn.take() {
+            // Check if connection is still healthy (guard already dropped)
+            if conn.query("SELECT 1 FROM DUAL").await.is_ok() {
+                return Ok(PooledConnection {
+                    conn: Some(conn),
+                    semaphore: self.semaphore.clone(),
+                    return_to_pool: Some(self.idle.clone()),
+                });
             }
+            // Connection is dead, fall through to create new one
         }
 
         // Create a new connection
