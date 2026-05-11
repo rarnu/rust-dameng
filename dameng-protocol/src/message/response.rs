@@ -365,9 +365,8 @@ impl Row {
         }
     }
 
-    /// Get the column index by finding it in the columns list.
-    /// Returns the row's column_index counter (thread-local style).
-    pub fn column_index(&self, columns: &[Column]) -> usize {
+    /// Placeholder: find column index by name (case-insensitive match).
+    pub fn column_index(&self, _columns: &[Column]) -> usize {
         0
     }
 }
