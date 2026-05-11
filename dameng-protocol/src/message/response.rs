@@ -44,6 +44,23 @@
 //!   For each column: u16 value_size + value_size bytes of data
 
 use crate::error::Result;
+
+/// LOB_LOCATOR size: DM returns a 16-byte locator for large CLOB/BLOB values.
+/// When the value size exceeds 2048 bytes, DM returns a locator instead of inline data.
+/// The client must use LOBREAD/FETCH operations to retrieve the actual content.
+pub const LOB_LOCATOR_SIZE: usize = 16;
+
+/// Maximum inline data size before DM uses LOB_LOCATOR.
+pub const LOB_LOCATOR_THRESHOLD: usize = 2048;
+
+/// Check if the given raw data is a LOB_LOCATOR (16 bytes) for the specified column type.
+/// DM uses LOB_LOCATOR for CLOB/BLOB values larger than 2048 bytes.
+pub fn is_lob_locator(data: &[u8], col_type_code: i32) -> bool {
+    let is_lob_type = matches!(col_type_code, 13 | 14); // BLOB=13, CLOB=14
+    is_lob_type && data.len() == LOB_LOCATOR_SIZE
+}
+
+
 use dameng_types::{DmValue, DmValueType};
 
 /// Derive type_code from type_name string.
