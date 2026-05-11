@@ -47,27 +47,44 @@ use crate::error::Result;
 use dameng_types::{DmValue, DmValueType};
 
 /// Derive type_code from type_name string.
-/// Used when the column header type_code field is 0 (sub_type=7 responses).
+/// The column header type_code field (offset 16) is unreliable on DM 8.1 — it
+/// often returns 4 (INT) for all types. type_name is the authoritative source.
 fn type_name_to_code(name: &str) -> i32 {
-    match name {
-        "BIT" => 1,
-        "TINYINT" => 2,
-        "VARCHAR" | "CHAR" | "BANNECHAR" => 3,
-        "INT" | "INTEGER" => 4,
-        "BIGINT" => 5,
-        "SMALLINT" => 6,
-        "FLOAT" => 7,
-        "DOUBLE" => 8,
-        "DECIMAL" | "NUMERIC" => 9,
-        "DATE" => 10,
-        "TIME" => 11,
-        "TIMESTAMP" => 12,
-        "BLOB" => 13,
-        "CLOB" => 14,
-        "INTERVAL" => 15,
-        "BINARY" => 17,
-        "VARBINARY" => 18,
-        _ => 0,
+    let upper = name.to_uppercase();
+    // Check timezone variants first (longer match before shorter)
+    if upper.contains("TIMESTAMP WITH TIME ZONE") || upper.contains("DATETIME WITH TIME ZONE")
+        || upper.contains("DATETIME2_TZ") {
+        12 // TIMESTAMP_TZ maps to TIMESTAMP (12)
+    } else if upper.contains("TIME WITH TIME ZONE") {
+        11 // TIME_TZ maps to TIME (11)
+    } else if upper.contains("INTERVAL DAY") || upper.contains("INTERVAL_DS")
+        || upper.contains("NUMTODSINTERVAL") {
+        15 // INTERVAL_DT
+    } else if upper.contains("INTERVAL YEAR") || upper.contains("INTERVAL_YM")
+        || upper.contains("NUMTOYMINTERVAL") {
+        15 // INTERVAL_YM
+    } else {
+        match upper.as_str() {
+            "BIT" | "BOOLEAN" => 1,
+            "TINYINT" => 2,
+            "VARCHAR" | "CHAR" | "BANNECHAR" | "VARCHAR2" | "NVARCHAR" | "NVARCHAR2" => 3,
+            "INT" | "INTEGER" | "NUMBER" => 4,
+            "BIGINT" | "LONG" => 5,
+            "SMALLINT" => 6,
+            "FLOAT" => 7,
+            "DOUBLE" | "DOUBLE PRECISION" => 8,
+            "DECIMAL" | "NUMERIC" => 9,
+            "DATE" => 10,
+            "TIME" => 11,
+            "TIMESTAMP" | "DATETIME" | "DATETIME2" => 12,
+            "BLOB" | "RAW" | "LONG RAW" => 13,
+            "CLOB" | "NCLOB" | "TEXT" => 14,
+            "INTERVAL" => 15,
+            "BINARY" | "VARBINARY" => 17,
+            "ROWID" => 18,
+            "XMLTYPE" => 14, // XML stored as CLOB-like
+            _ => 0,
+        }
     }
 }
 
@@ -412,7 +429,9 @@ impl ExecResponse {
         }
 
         // === First Column Header (16 bytes, offset 16) ===
-        let first_col_type = i32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+        // Note: first_col_type at offset 16 is unreliable on DM 8.1 — always returns 4 (INT).
+        // We derive the correct type_code from the type_name string instead.
+        let _first_col_type = i32::from_le_bytes([data[16], data[17], data[18], data[19]]);
         let first_nullable = u16::from_le_bytes([data[20], data[21]]);
         let col_count = u16::from_le_bytes([data[22], data[23]]);
         let col_name_len = u16::from_le_bytes([data[24], data[25]]) as usize;
@@ -461,12 +480,9 @@ impl ExecResponse {
                 offset += 1;
             }
 
-            // Derive type_code from type_name if header field is 0 (sub_type=7)
-            let actual_type_code = if first_col_type == 0 {
-                type_name_to_code(&type_name)
-            } else {
-                first_col_type
-            };
+            // Always derive type_code from type_name — the header field (offset 16)
+            // is unreliable on DM 8.1 (often returns 4/INT for all types).
+            let actual_type_code = type_name_to_code(&type_name);
 
             columns.push(Column {
                 name: col_name,
