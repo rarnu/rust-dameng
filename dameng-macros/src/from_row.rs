@@ -32,7 +32,7 @@ pub fn derive_from_row(input: TokenStream) -> TokenStream {
         let ty = &field.ty;
         let ty_str = quote!(#ty).to_string();
 
-        let extract = typed_extract_expr(&ty_str, col_idx);
+        let extract = typed_extract_expr(ty, &ty_str, col_idx);
         field_init.push(quote! {
             #ident: #extract
         });
@@ -53,7 +53,7 @@ pub fn derive_from_row(input: TokenStream) -> TokenStream {
     expanded.into()
 }
 
-fn typed_extract_expr(ty_str: &str, col_idx: usize) -> proc_macro2::TokenStream {
+fn typed_extract_expr(ty: &syn::Type, ty_str: &str, col_idx: usize) -> proc_macro2::TokenStream {
     let idx = col_idx;
     match ty_str {
         "i32" => {
@@ -113,7 +113,7 @@ fn typed_extract_expr(ty_str: &str, col_idx: usize) -> proc_macro2::TokenStream 
         _ => {
             quote! {
                 String::from(row.get_str(#idx).map_err(tokio_dameng::error::Error::DecodeError)?)
-                    .parse::<#ty_str>().map_err(tokio_dameng::error::Error::DecodeError)?
+                    .parse::<#ty>().map_err(tokio_dameng::error::Error::DecodeError)?
             }
         }
     }
