@@ -45,11 +45,33 @@ impl LobDataMessage {
     }
 
     /// Encode to payload bytes (without frame header).
-    pub fn encode_payload(&self) -> BytesMut {
+    ///
+    /// Matches the Go driver's dm_build_811 message format:
+    /// - 20 bytes reserved (zeros)
+    /// - param_index (i16 LE, USINT) at offset 20
+    /// - data_length (i32 LE, ULINT) at offset 22
+    /// - if NewLobFlag: -1 (i32 LE, ULINT) at offset 26
+    /// - data bytes starting at offset 28 (or 26 if no NewLobFlag)
+    pub fn encode_payload(&self, new_lob_flag: bool) -> BytesMut {
         let mut buf = BytesMut::new();
+
+        // 20 bytes reserved (matching Go's Dm_build_810 = Dm_build_327 = 20)
+        buf.put_bytes(0, 20);
+
+        // param_index (USINT = i16 LE) at offset 20
         buf.put_i16_le(self.param_index);
+
+        // data_length (ULINT = i32 LE) at offset 22
         buf.put_i32_le(self.data.len() as i32);
+
+        // if NewLobFlag: write -1 (ULINT) at offset 26
+        if new_lob_flag {
+            buf.put_i32_le(-1);
+        }
+
+        // data bytes
         buf.put_slice(&self.data);
+
         buf
     }
 }
@@ -170,14 +192,29 @@ mod tests {
     }
 
     #[test]
-    fn test_lob_data_message_encode() {
+    fn test_lob_data_message_encode_no_new_flag() {
         let msg = LobDataMessage::new(0, vec![1, 2, 3, 4, 5]);
-        let payload = msg.encode_payload();
-        // param_index (2) + data_len (4) + data (5) = 11
-        assert_eq!(payload.len(), 11);
-        assert_eq!(i16::from_le_bytes([payload[0], payload[1]]), 0);
-        assert_eq!(i32::from_le_bytes([payload[2], payload[3], payload[4], payload[5]]), 5);
-        assert_eq!(&payload[6..], &[1, 2, 3, 4, 5]);
+        let payload = msg.encode_payload(false);
+        // reserved(20) + param_index(2) + data_len(4) + data(5) = 31
+        assert_eq!(payload.len(), 31);
+        assert!(payload[..20].iter().all(|&b| b == 0));
+        assert_eq!(i16::from_le_bytes([payload[20], payload[21]]), 0);
+        assert_eq!(i32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]), 5);
+        assert_eq!(&payload[26..], &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_lob_data_message_encode_with_new_flag() {
+        let msg = LobDataMessage::new(2, vec![1, 2, 3, 4, 5]);
+        let payload = msg.encode_payload(true);
+        // reserved(20) + param_index(2) + data_len(4) + new_flag_marker(4) + data(5) = 35
+        assert_eq!(payload.len(), 35);
+        assert!(payload[..20].iter().all(|&b| b == 0));
+        assert_eq!(i16::from_le_bytes([payload[20], payload[21]]), 2);
+        assert_eq!(i32::from_le_bytes([payload[22], payload[23], payload[24], payload[25]]), 5);
+        // NewLobFlag marker: -1
+        assert_eq!(i32::from_le_bytes([payload[26], payload[27], payload[28], payload[29]]), -1);
+        assert_eq!(&payload[30..], &[1, 2, 3, 4, 5]);
     }
 
     #[test]

@@ -416,7 +416,7 @@ impl Client {
                     let chunks = split_lob_data(data);
                     for chunk in &chunks {
                         let lob_msg = LobDataMessage::new(param_idx as i16, chunk.clone());
-                        let lob_payload = lob_msg.encode_payload();
+                        let lob_payload = lob_msg.encode_payload(self.new_lob_flag);
                         self.write_all(&build_message(DM_LOB_DATA_MSG_TYPE, stmt_id, &lob_payload))?;
                         let (lob_frame, _) = self.read_message()?;
                         if lob_frame.response_code < 0 {
