@@ -44,6 +44,7 @@
 //!   For each column: u16 value_size + value_size bytes of data
 
 use crate::error::Result;
+use dameng_types::encoding::{ServerEncoding, decode_from_server};
 
 /// LOB_LOCATOR size: DM returns a 16-byte locator for large CLOB/BLOB values.
 /// When the value size exceeds 2048 bytes, DM returns a locator instead of inline data.
@@ -441,7 +442,7 @@ impl ExecResponse {
     ///
     /// Supports both EXEC (type 5) metadata-only responses and
     /// OPTIMIZED_PREPARE_EXEC (type 91) responses with inline row data.
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
+    pub fn from_bytes(data: &[u8], server_encoding: ServerEncoding) -> Result<Self> {
         if data.len() < 16 {
             return Err(crate::error::Error::Incomplete);
         }
@@ -480,7 +481,7 @@ impl ExecResponse {
         if col_count > 0 {
             // col_name (explicit length from col_name_len field at offset 24-25)
             let col_name = if col_name_len > 0 && offset + col_name_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + col_name_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + col_name_len])
             } else {
                 String::new()
             };
@@ -488,7 +489,7 @@ impl ExecResponse {
 
             // type_name
             let type_name = if type_name_len > 0 && offset + type_name_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + type_name_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + type_name_len])
             } else {
                 String::new()
             };
@@ -496,7 +497,7 @@ impl ExecResponse {
 
             // table_name
             let table_name = if table_name_len > 0 && offset + table_name_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + table_name_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + table_name_len])
             } else {
                 String::new()
             };
@@ -504,7 +505,7 @@ impl ExecResponse {
 
             // schema_name
             let schema_name = if schema_name_len > 0 && offset + schema_name_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + schema_name_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + schema_name_len])
             } else {
                 String::new()
             };
@@ -601,7 +602,7 @@ impl ExecResponse {
             // Strings start at header_off + 32
             offset = header_off + 32;
             let c_name = if c_name_len > 0 && offset + c_name_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + c_name_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + c_name_len])
             } else {
                 offset = row_start;
                 break;
@@ -609,17 +610,17 @@ impl ExecResponse {
             offset += c_name_len;
 
             let c_type_name = if c_type_name_len > 0 && offset + c_type_name_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + c_type_name_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + c_type_name_len])
             } else { String::new() };
             offset += c_type_name_len;
 
             let c_table = if c_table_len > 0 && offset + c_table_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + c_table_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + c_table_len])
             } else { String::new() };
             offset += c_table_len;
 
             let c_schema = if c_schema_len > 0 && offset + c_schema_len <= data.len() {
-                String::from_utf8_lossy(&data[offset..offset + c_schema_len]).to_string()
+                decode_from_server(server_encoding, &data[offset..offset + c_schema_len])
             } else { String::new() };
             offset += c_schema_len;
 
@@ -873,7 +874,7 @@ mod tests {
             0x00, 0x00,             // table_name_len
             0x00, 0x00,             // schema_name_len
         ];
-        let resp = ExecResponse::from_bytes(&data).unwrap();
+        let resp = ExecResponse::from_bytes(&data, ServerEncoding::Utf8).unwrap();
         assert_eq!(resp.col_count, 0);
         assert_eq!(resp.num_columns(), 0);
         assert_eq!(resp.num_rows(), 0);
@@ -889,7 +890,7 @@ mod tests {
             // Row data (18 bytes): marker=18, flags=0, rec_id=0, padding=0, col_off=12, val_size=4, val=1
             0x12, 0x00, 0x00,0x00,0x00,0x00, 0x00,0x00, 0x00,0x00, 0x0c,0x00, 0x04,0x00, 0x01,0x00,0x00,0x00,
         ];
-        let resp = ExecResponse::from_bytes(&data).unwrap();
+        let resp = ExecResponse::from_bytes(&data, ServerEncoding::Utf8).unwrap();
         assert_eq!(resp.col_count, 1);
         assert_eq!(resp.num_columns(), 1);
         assert_eq!(resp.num_rows(), 1);
@@ -914,7 +915,7 @@ mod tests {
             0x00, 0x00, 0x0c, 0x00, 0x04, 0x00, 0x01, 0x00,
             0x00, 0x00,
         ];
-        let resp = ExecResponse::from_bytes(&data).unwrap();
+        let resp = ExecResponse::from_bytes(&data, ServerEncoding::Utf8).unwrap();
         assert_eq!(resp.col_count, 1);
         assert_eq!(resp.num_columns(), 1);
         assert_eq!(resp.num_rows(), 1);
@@ -927,7 +928,7 @@ mod tests {
     #[test]
     fn test_exec_response_incomplete() {
         let data = [0x00, 0x00, 0x00];
-        let result = ExecResponse::from_bytes(&data);
+        let result = ExecResponse::from_bytes(&data, ServerEncoding::Utf8);
         assert!(matches!(result, Err(crate::error::Error::Incomplete)));
     }
 

@@ -5,6 +5,9 @@
 
 use std::str::FromStr;
 
+pub mod encoding;
+pub use encoding::{ServerEncoding, encode_to_server, decode_from_server};
+
 /// Dameng SQL value type enum.
 ///
 /// Maps DM type codes to Rust types for encoding and decoding.

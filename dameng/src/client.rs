@@ -8,6 +8,7 @@ use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
 use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
 use dameng_protocol::message::bind::BindParam;
+use dameng_types::encoding::ServerEncoding;
 
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
@@ -39,7 +40,7 @@ pub struct Client {
     /// Transaction isolation level.
     pub isolation_level: IsolationLevel,
     /// Server encoding (1=UTF-8, 2=GB18030).
-    pub encoding: u8,
+    pub server_encoding: ServerEncoding,
     /// Whether the server supports the extended LOB format (NewLobFlag).
     pub new_lob_flag: bool,
 }
@@ -56,7 +57,7 @@ impl Client {
             challenge: vec![],
             auto_commit: true,
             isolation_level: IsolationLevel::ReadCommitted,
-            encoding: 1,
+            server_encoding: ServerEncoding::Utf8,
             new_lob_flag: false,
         }
     }
@@ -75,6 +76,8 @@ impl Client {
 
         self.send_login(username, password)?;
         let login_resp = self.read_login_response()?;
+        // Save server encoding from LOGIN_RESPONSE (1=UTF-8, 2=GB18030)
+        self.server_encoding = ServerEncoding::from_protocol_value(login_resp.encoding);
         if !login_resp.username.is_empty() {
             self.state = State::Ready;
             Ok(())
@@ -392,11 +395,11 @@ impl Client {
             if payload.is_empty() {
                 return Ok(ResultSet::new());
             }
-            let resp = ExecResponse::from_bytes(&payload)?;
+            let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
             return Ok(ResultSet { columns: resp.columns, rows: resp.rows });
         }
         if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
-            let resp = ExecResponse::from_bytes(&payload)?;
+            let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
             Ok(ResultSet { columns: resp.columns, rows: resp.rows })
         } else {
             Err(Error::ConnectionFailed(format!(

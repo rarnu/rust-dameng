@@ -3,6 +3,7 @@
 use bytes::BytesMut;
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
+use dameng_types::encoding::ServerEncoding;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -26,8 +27,8 @@ pub struct Client {
     handle: u32,
     challenge: Vec<u8>,
     auto_commit: bool,
-    #[allow(dead_code)]
-    encoding: u8,
+    /// Server encoding (1=UTF-8, 2=GB18030).
+    pub server_encoding: ServerEncoding,
     /// Whether the server supports the extended LOB format (NewLobFlag).
     new_lob_flag: bool,
     /// Transaction isolation level.
@@ -44,7 +45,7 @@ impl Client {
             handle: 0,
             challenge: vec![],
             auto_commit: true,
-            encoding: 1,
+            server_encoding: ServerEncoding::Utf8,
             new_lob_flag: false,
             isolation_level: dameng_protocol::message::isolation::IsolationLevel::ReadCommitted,
         }
@@ -62,6 +63,8 @@ impl Client {
 
         self.send_login(username, password).await?;
         let login_resp = self.read_login_response().await?;
+        // Save server encoding from LOGIN_RESPONSE (1=UTF-8, 2=GB18030)
+        self.server_encoding = ServerEncoding::from_protocol_value(login_resp.encoding);
         if !login_resp.username.is_empty() {
             self.state = State::Ready;
             log::info!("Connected to Dameng as {} on {}", login_resp.username, login_resp.server_name);
@@ -435,7 +438,7 @@ impl Client {
 
         // Helper to convert ExecResponse into ResultSet
         let parse_rows = |payload: &[u8]| -> Result<ResultSet> {
-            let resp = ExecResponse::from_bytes(payload)?;
+            let resp = ExecResponse::from_bytes(payload, self.server_encoding)?;
             let rows: Vec<Row> = resp.rows;
             Ok(ResultSet { columns: resp.columns, rows })
         };
