@@ -448,6 +448,168 @@ impl From<Vec<u8>> for DmValue {
     }
 }
 
+// --- Option<T> From impls ---
+
+impl From<Option<i8>> for DmValue {
+    fn from(v: Option<i8>) -> Self {
+        v.map(DmValue::TinyInt).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<i16>> for DmValue {
+    fn from(v: Option<i16>) -> Self {
+        v.map(DmValue::SmallInt).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<i32>> for DmValue {
+    fn from(v: Option<i32>) -> Self {
+        v.map(DmValue::Int).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<i64>> for DmValue {
+    fn from(v: Option<i64>) -> Self {
+        v.map(DmValue::BigInt).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<f32>> for DmValue {
+    fn from(v: Option<f32>) -> Self {
+        v.map(DmValue::Float).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<f64>> for DmValue {
+    fn from(v: Option<f64>) -> Self {
+        v.map(DmValue::Double).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<String>> for DmValue {
+    fn from(v: Option<String>) -> Self {
+        v.map(DmValue::Text).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<&str>> for DmValue {
+    fn from(v: Option<&str>) -> Self {
+        v.map(|s| s.to_string())
+            .map(DmValue::Text)
+            .unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<bool>> for DmValue {
+    fn from(v: Option<bool>) -> Self {
+        v.map(DmValue::Boolean).unwrap_or(DmValue::Null)
+    }
+}
+
+impl From<Option<Vec<u8>>> for DmValue {
+    fn from(v: Option<Vec<u8>>) -> Self {
+        v.map(DmValue::Bytea).unwrap_or(DmValue::Null)
+    }
+}
+
+/// Trait for dynamic parameter binding — SQLx-style `&[&dyn ToDmValue]` support.
+///
+/// # Example
+///
+/// ```ignore
+/// let name = "Alice";
+/// let age: i32 = 30;
+/// let rows = client.query_with_params(
+///     "SELECT * FROM person WHERE name = ? AND age > ?",
+///     &[&name, &age],
+/// )?;
+/// ```
+pub trait ToDmValue {
+    /// Convert this value into a `DmValue`.
+    fn to_dm_value(&self) -> DmValue;
+}
+
+// --- ToDmValue implementations for concrete types ---
+
+macro_rules! impl_to_dm_value {
+    ($($ty:ty => $variant:ident),* $(,)?) => {
+        $(
+            impl ToDmValue for $ty {
+                fn to_dm_value(&self) -> DmValue {
+                    DmValue::$variant(*self)
+                }
+            }
+        )*
+    };
+}
+
+impl_to_dm_value!(
+    bool => Boolean,
+    i8 => TinyInt,
+    i16 => SmallInt,
+    i32 => Int,
+    i64 => BigInt,
+    f32 => Float,
+    f64 => Double,
+);
+
+impl ToDmValue for str {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Text(self.to_string())
+    }
+}
+
+impl ToDmValue for String {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Text(self.clone())
+    }
+}
+
+impl ToDmValue for [u8] {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Bytea(self.to_vec())
+    }
+}
+
+impl ToDmValue for Vec<u8> {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Bytea(self.clone())
+    }
+}
+
+// --- Option<T> implementations ---
+
+macro_rules! impl_option_to_dm_value {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl ToDmValue for Option<$ty> {
+                fn to_dm_value(&self) -> DmValue {
+                    match self {
+                        Some(v) => v.to_dm_value(),
+                        None => DmValue::Null,
+                    }
+                }
+            }
+        )*
+    };
+}
+
+impl_option_to_dm_value!(bool, i8, i16, i32, i64, f32, f64, String);
+
+impl ToDmValue for Option<&str> {
+    fn to_dm_value(&self) -> DmValue {
+        self.map(|s| s.to_string())
+            .map(DmValue::Text)
+            .unwrap_or(DmValue::Null)
+    }
+}
+
+impl ToDmValue for Option<Vec<u8>> {
+    fn to_dm_value(&self) -> DmValue {
+        self.clone().map(DmValue::Bytea).unwrap_or(DmValue::Null)
+    }
+}
+
 /// Encode a Rust value to DM protocol bytes.
 pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
     match ty {

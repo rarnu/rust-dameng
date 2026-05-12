@@ -378,62 +378,184 @@ fn main() {
         &mut f,
     );
 
-    // --- Parameter binding tests (using existing SAMPLE table) ---
+    // --- Parameter binding tests (dedicated table) ---
     println!("\n=== Parameter Binding Tests ===");
+
+    // Create a fresh table for param binding tests
+    let _ = exec(&mut c, "DROP TABLE RUST_PARAM_TEST");
     run(
-        "Param binding: SELECT with INT param",
+        "Param: CREATE TABLE",
+        exec(
+            &mut c,
+            "CREATE TABLE RUST_PARAM_TEST (ID INT, NAME VARCHAR(50), SCORE DOUBLE)",
+        )
+        .map(|_| "created".into()),
+        &mut p,
+        &mut f,
+    );
+
+    // First: INSERT using plain execute() — verify this path works
+    run(
+        "Param: INSERT via execute() (no params)",
         (|| {
-            // Clean up first to avoid unique constraint conflicts
-            let _ = exec(&mut c, "DELETE FROM SAMPLE WHERE ID = 9999");
-            // Insert a test row
-            exec(&mut c, "INSERT INTO SAMPLE (ID, NAME) VALUES (9999, 'ParamTest')")?;
-            // Then query with parameter binding using real BIND_EXEC2 protocol
-            let sql = "SELECT ID, NAME FROM SAMPLE WHERE ID = ?";
-            let params = vec![BindParam {
-                type_name: "INT".to_string(),
-                type_code: 4,
-                precision: 10,
-                scale: 0,
-                direction: ParameterDirection::Input,
-                value: Some(vec![243u8, 39, 0, 0]), // 9999 in i32 LE
-            }];
-            let result = c.execute_with_params(0, sql, &params);
-            match result {
-                Ok(rs) => {
-                    if rs.rows.is_empty() {
-                        return Ok("bind ok (empty result)".into());
-                    }
-                    let row = rs.rows.first().ok_or("no rows")?;
-                    let id = row.get_i32(0).map_err(|e| e.to_string())?;
-                    assert_eq!(id, 9999, "ID expected 9999, got {}", id);
-                    Ok(format!(
-                        "found row ID={} NAME={}",
-                        id,
-                        row.get_str(1).unwrap_or_default()
-                    ))
-                    .into()
-                }
-                Err(e) => {
-                    // Known issue: BIND (type 13) message format needs debugging
-                    // -6625 means the server rejects the BIND payload
-                    // The real_param_binding example uses execute_with_params
-                    // which currently sends BIND without a PREPARE step
-                    return Ok(format!(
-                        "SKIP: BIND not yet supported (error: {})",
-                        e.to_string().chars().take(200).collect::<String>()
-                    ))
-                    .into();
-                }
-            }
+            let _ = exec(&mut c, "INSERT INTO RUST_PARAM_TEST (ID, NAME, SCORE) VALUES (10, 'Plain', 11.1)");
+            let rs = c
+                .query("SELECT COUNT(*) FROM RUST_PARAM_TEST")
+                .map_err(|e| e.to_string())?;
+            let count = rs.first()
+                .ok_or("no rows from COUNT")?
+                .get_i32(0)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("COUNT after execute() insert = {}", count))
         })(),
         &mut p,
         &mut f,
     );
 
+    // INSERT with params
     run(
-        "Param binding: cleanup",
+        "Param: INSERT with execute_with_params",
         (|| {
-            let _ = exec(&mut c, "DELETE FROM SAMPLE WHERE ID = 9999");
+            let name1: String = "Alice".into();
+            let affected = c
+                .execute_with_params(
+                    "INSERT INTO RUST_PARAM_TEST (ID, NAME, SCORE) VALUES (?, ?, ?)",
+                    &[&1i32, &name1, &99.5f64],
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(affected >= 1, "Expected affected >= 1, got {}", affected);
+            let name2: String = "Bob".into();
+            let affected = c
+                .execute_with_params(
+                    "INSERT INTO RUST_PARAM_TEST (ID, NAME, SCORE) VALUES (?, ?, ?)",
+                    &[&2i32, &name2, &88.0f64],
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(affected >= 1, "Expected affected >= 1, got {}", affected);
+            let name3: String = "Charlie".into();
+            let affected = c
+                .execute_with_params(
+                    "INSERT INTO RUST_PARAM_TEST (ID, NAME, SCORE) VALUES (?, ?, ?)",
+                    &[&3i32, &name3, &77.5f64],
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(affected >= 1, "Expected affected >= 1, got {}", affected);
+            Ok("3 rows inserted".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    // Verify after param inserts
+    run(
+        "Param: verify data with plain query()",
+        (|| {
+            let rs = c
+                .query("SELECT COUNT(*) FROM RUST_PARAM_TEST")
+                .map_err(|e| e.to_string())?;
+            let count = rs.first()
+                .ok_or("no rows from COUNT")?
+                .get_i32(0)
+                .map_err(|e| e.to_string())?;
+            Ok(format!("COUNT after execute_with_params inserts = {}", count))
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    // SELECT with params
+    run(
+        "Param: SELECT with query_with_params",
+        (|| {
+            let rs = c
+                .query_with_params(
+                    "SELECT ID, NAME, SCORE FROM RUST_PARAM_TEST WHERE ID > ?",
+                    &[&0i32],
+                )
+                .map_err(|e| e.to_string())?;
+            assert_eq!(
+                rs.rows.len(),
+                3,
+                "Expected 3 rows, got {}",
+                rs.rows.len()
+            );
+            let first_id = rs.rows[0].get_i32(0).map_err(|e| e.to_string())?;
+            assert_eq!(first_id, 1, "First ID expected 1, got {}", first_id);
+            Ok(format!("found {} rows", rs.rows.len()))
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    // UPDATE with params
+    run(
+        "Param: UPDATE with execute_with_params",
+        (|| {
+            let name: String = "AliceModified".into();
+            let affected = c
+                .execute_with_params(
+                    "UPDATE RUST_PARAM_TEST SET NAME = ?, SCORE = ? WHERE ID = ?",
+                    &[&name, &100.0f64, &1i32],
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(affected >= 1, "Expected affected >= 1, got {}", affected);
+            // Verify update
+            let rs = c
+                .query_with_params(
+                    "SELECT NAME, SCORE FROM RUST_PARAM_TEST WHERE ID = ?",
+                    &[&1i32],
+                )
+                .map_err(|e| e.to_string())?;
+            let row = rs.rows.first().ok_or("no row after update")?;
+            let got_name = row.get_str(0).map_err(|e| e.to_string())?;
+            assert_eq!(got_name, "AliceModified", "Name mismatch");
+            Ok("updated and verified".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    // DELETE with params — THIS IS THE CRITICAL TEST
+    run(
+        "Param: DELETE with execute_with_params",
+        (|| {
+            // Delete rows with ID >= 2 AND ID <= 3
+            let id_min: i32 = 2;
+            let id_max: i32 = 3;
+            let affected = c
+                .execute_with_params(
+                    "DELETE FROM RUST_PARAM_TEST WHERE ID >= ? AND ID <= ?",
+                    &[&id_min, &id_max],
+                )
+                .map_err(|e| e.to_string())?;
+            assert!(
+                affected >= 2,
+                "Expected affected >= 2, got {}",
+                affected
+            );
+            // Verify only 1 row remains
+            let rs = c
+                .query("SELECT COUNT(*) FROM RUST_PARAM_TEST")
+                .map_err(|e| e.to_string())?;
+            let count = rs.first()
+                .ok_or("no rows")?
+                .get_i32(0)
+                .map_err(|e| e.to_string())?;
+            assert_eq!(count, 1, "Expected 1 row after delete, got {}", count);
+            Ok(format!(
+                "deleted {} rows, remaining={}",
+                affected, count
+            ))
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    // Cleanup param test table
+    run(
+        "Param: cleanup",
+        (|| {
+            let _ = exec(&mut c, "DROP TABLE RUST_PARAM_TEST");
             Ok("cleaned".into())
         })(),
         &mut p,

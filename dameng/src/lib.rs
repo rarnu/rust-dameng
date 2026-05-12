@@ -16,3 +16,6 @@ pub use row::Row;
 // Re-export protocol types needed for parameter binding
 pub use dameng_protocol::message::{BindParam, ParameterDirection};
 pub use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
+
+// Re-export ToDmValue trait for SQLx-style dynamic binding
+pub use dameng_types::ToDmValue;

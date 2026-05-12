@@ -168,7 +168,7 @@ impl<'a> Query<'a> {
         let rs = if self.params.is_empty() {
             client.query(&self.sql).await?
         } else {
-            client.execute_with_params(0, &self.sql, &self.params).await?
+            client.do_execute_with_bind_params(&self.sql, true, &self.params).await?
         };
         Ok(vec![rs])
     }
@@ -236,7 +236,7 @@ impl<'a, R: FromRow> QueryAs<'a, R> {
         let rs = if self.params.is_empty() {
             client.query(&self.sql).await?
         } else {
-            client.execute_with_params(0, &self.sql, &self.params).await?
+            client.do_execute_with_bind_params(&self.sql, true, &self.params).await?
         };
 
         let mut results = Vec::new();
@@ -285,7 +285,7 @@ impl<'a, S> QueryScalar<'a, S> {
         let rs = if self.params.is_empty() {
             client.query(&self.sql).await?
         } else {
-            client.execute_with_params(0, &self.sql, &self.params).await?
+            client.do_execute_with_bind_params(&self.sql, true, &self.params).await?
         };
 
         let row = rs.rows.first().ok_or_else(|| {

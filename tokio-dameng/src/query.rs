@@ -96,7 +96,7 @@ impl<'a> Query<'a> {
         if self.params.is_empty() {
             self.client.query(&self.sql).await
         } else {
-            self.client.execute_with_params(0, &self.sql, &self.params).await
+            self.client.do_execute_with_bind_params(&self.sql, true, &self.params).await
         }
     }
 

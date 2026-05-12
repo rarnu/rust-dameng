@@ -453,12 +453,13 @@ impl ExecResponse {
         let _reserved = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
         let header_row_count = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
 
-        // If data is too short for first column header, treat as empty result
-        // This can happen with BIND (type 13) responses for certain queries
+        // If data is too short for first column header, return what we can.
+        // For DML (INSERT/UPDATE/DELETE) the affected row count is in the fixed
+        // 16-byte header — so we still extract it even without column metadata.
         if data.len() < 32 {
             return Ok(ExecResponse {
                 col_count: 0,
-                row_count: 0,
+                row_count: header_row_count,
                 columns: vec![],
                 rows: vec![],
             });
@@ -930,6 +931,23 @@ mod tests {
         let data = [0x00, 0x00, 0x00];
         let result = ExecResponse::from_bytes(&data, ServerEncoding::Utf8);
         assert!(matches!(result, Err(crate::error::Error::Incomplete)));
+    }
+
+    #[test]
+    fn test_exec_response_short_payload_dml() {
+        // INSERT/UPDATE/DELETE response with only 16-byte header (no column metadata).
+        // The affected row count must still be extracted from the header.
+        let data = [
+            0x07, 0x00, 0x00, 0x00, // sub_type
+            0x04, 0x00, 0x00, 0x00, // flags
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x01, 0x00, 0x00, 0x00, // row_count = 1 (affected rows)
+        ];
+        let resp = ExecResponse::from_bytes(&data, ServerEncoding::Utf8).unwrap();
+        assert_eq!(resp.row_count, 1);
+        assert_eq!(resp.col_count, 0);
+        assert_eq!(resp.num_columns(), 0);
+        assert_eq!(resp.num_rows(), 0);
     }
 
     #[test]

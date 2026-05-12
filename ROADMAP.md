@@ -211,7 +211,7 @@
 
 | ID | 描述 | 优先级 | 状态 | 完成日期 |
 |----|------|--------|------|----------|
-| H1 | LOB 读取实现 | HIGH | ✅ 完成 (LOBREAD/LOBFREE/LOBGETLEN + 游标跟踪 + 审计修复 LOB_BIND 20字节前缀) | |
+| H1 | LOB 读取实现 | HIGH | ✅ 完成 (LOBREAD/LOBFREE/LOBGETLEN + 游标跟踪 + newBlobId 刷新 + 审计修复 LOB_BIND 20字节前缀 + NewLobFlag 标记) | |
 | H2 | GB18030 编码转换 | HIGH | 🟢 已完成 | 2026-05-12 |
 || M1 | 事务隔离级别 | MEDIUM | 🟢 已完成 | 2026-05-12 |
 | M2 | 连接参数扩展 | MEDIUM | 🟢 已完成 | 2026-05-12 |

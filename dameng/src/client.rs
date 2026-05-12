@@ -14,6 +14,109 @@ use dameng_types::encoding::ServerEncoding;
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
 
+/// Convert a `ToDmValue` reference into a `BindParam` suitable for the DM protocol.
+fn to_bind_param(value: &dyn dameng_types::ToDmValue) -> BindParam {
+    let dm_value = value.to_dm_value();
+    match dm_value {
+        dameng_types::DmValue::Int(i) => BindParam {
+            type_name: "INT".to_string(),
+            type_code: 4,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(i.to_le_bytes().to_vec()),
+        },
+        dameng_types::DmValue::BigInt(i) => BindParam {
+            type_name: "BIGINT".to_string(),
+            type_code: 5,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(i.to_le_bytes().to_vec()),
+        },
+        dameng_types::DmValue::SmallInt(i) => BindParam {
+            type_name: "SMALLINT".to_string(),
+            type_code: 6,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(i.to_le_bytes().to_vec()),
+        },
+        dameng_types::DmValue::TinyInt(i) => BindParam {
+            type_name: "TINYINT".to_string(),
+            type_code: 2,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(i.to_le_bytes().to_vec()),
+        },
+        dameng_types::DmValue::Float(f) => BindParam {
+            type_name: "FLOAT".to_string(),
+            type_code: 7,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(f.to_le_bytes().to_vec()),
+        },
+        dameng_types::DmValue::Double(d) => BindParam {
+            type_name: "DOUBLE".to_string(),
+            type_code: 8,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(d.to_le_bytes().to_vec()),
+        },
+        dameng_types::DmValue::Text(s) => BindParam {
+            type_name: "VARCHAR".to_string(),
+            type_code: 3,
+            precision: s.len() as i32,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(s.into_bytes()),
+        },
+        dameng_types::DmValue::Bytea(b) => BindParam {
+            type_name: "VARBINARY".to_string(),
+            type_code: 18,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(b),
+        },
+        dameng_types::DmValue::Boolean(b) => BindParam {
+            type_name: "BIT".to_string(),
+            type_code: 1,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(vec![if b { 1 } else { 0 }]),
+        },
+        dameng_types::DmValue::Null => BindParam {
+            type_name: "INT".to_string(),
+            type_code: 4,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: None,
+        },
+        dameng_types::DmValue::Decimal(d) => BindParam {
+            type_name: "DECIMAL".to_string(),
+            type_code: 9,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(d.to_string().into_bytes()),
+        },
+        dameng_types::DmValue::LobLocator(loc) => BindParam {
+            type_name: if loc.is_clob { "CLOB".to_string() } else { "BLOB".to_string() },
+            type_code: if loc.is_clob { 14 } else { 13 },
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(loc.raw.to_vec()),
+        },
+    }
+}
+
 /// A stream that can be either plain TCP or TLS-wrapped.
 enum Stream {
     Tcp(TcpStream),
@@ -328,63 +431,158 @@ impl Client {
         Ok(())
     }
 
-    /// Execute a SQL with bound parameters.
+    /// Execute a SQL statement with dynamic parameters and return the number of affected rows.
     ///
-    /// Protocol flow:
-    /// 1. READY
-    /// 2. EXEC(sql) with stmt_id to PREPARE the statement (get server param metadata)
-    /// 3. BIND(params) with stmt_id to bind values and execute
-    /// 4. Read EXEC_RESPONSE for results
-    /// 5. COMMIT if auto_commit
-    /// 6. STATEMENT_FREE to release stmt_id
-    /// Execute a SQL with bound parameters using the real BIND_EXEC2 protocol.
+    /// # SQLx-style usage
+    /// Execute a SQL statement with dynamic parameters and return the number of affected rows.
     ///
-    /// Protocol flow:
-    /// 1. READY (keepalive)
-    /// 2. EXEC(5) with PrepareMessage (64-byte header + SQL) to PREPARE
-    /// 3. BIND_EXEC2(90) with parameter descriptors + values to execute
-    /// 4. Read EXEC_RESPONSE for results
-    /// 5. COMMIT if auto_commit
-    /// 6. STATEMENT_FREE to release stmt_id
+    /// For DML: INSERT, UPDATE, DELETE, CREATE, DROP, etc.
+    /// Auto-commits if `auto_commit` is enabled.
+    ///
+    /// # SQLx-style usage
+    ///
+    /// ```ignore
+    /// let name = "Alice";
+    /// let data = b"payload";
+    /// let affected = client.execute_with_params(
+    ///     "INSERT INTO person (name, data) VALUES (?, ?)",
+    ///     &[&name, &data],
+    /// )?;
+    /// ```
+    ///
+    /// Supported parameter types via `ToDmValue`:
+    /// - `&i8`, `&i16`, `&i32`, `&i64`, `&f32`, `&f64`, `&bool`
+    /// - `&str`, `&String`, `&[u8]`, `&Vec<u8>`
+    /// - `&Option<T>` for all above (sends NULL when `None`)
     pub fn execute_with_params(
         &mut self,
-        stmt_id_in: u32,
         sql: &str,
-        params: &[BindParam],
+        params: &[&dyn dameng_types::ToDmValue],
+    ) -> Result<u64> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        let bind_params: Vec<BindParam> = params
+            .iter()
+            .map(|p| to_bind_param(*p))
+            .collect();
+
+        self.do_execute_dml_with_params(&bind_params, sql)
+    }
+
+    /// Execute a SQL SELECT query with dynamic parameters and return the result set.
+    ///
+    /// For SELECT statements only. Does NOT auto-commit.
+    ///
+    /// # SQLx-style usage
+    ///
+    /// ```ignore
+    /// let id: i32 = 1;
+    /// let age: i32 = 18;
+    /// let rows = client.query_with_params(
+    ///     "SELECT * FROM person WHERE id > ? AND age > ?",
+    ///     &[&id, &age],
+    /// )?;
+    /// ```
+    pub fn query_with_params(
+        &mut self,
+        sql: &str,
+        params: &[&dyn dameng_types::ToDmValue],
     ) -> Result<ResultSet> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
 
-        let has_result_set = sql.trim_start().to_uppercase().starts_with("SELECT");
+        let bind_params: Vec<BindParam> = params
+            .iter()
+            .map(|p| to_bind_param(*p))
+            .collect();
 
-        // Step 1: READY
-        let ready_frame = Frame::new(READY, 0, 0);
-        self.write_all(&ready_frame.encode())?;
-        self.read_message()?;
+        self.do_query_with_params(&bind_params, sql)
+    }
 
+    /// Execute DML (non-SELECT) with bound params — always commits if auto_commit.
+    fn do_execute_dml_with_params(&mut self, params: &[BindParam], sql: &str) -> Result<u64> {
         if params.is_empty() {
-            // No params: just use OPTIMIZED_PREPARE_EXEC directly
-            let exec = ExecMessage::new(sql, 0);
-            let exec_payload = exec.encode_payload();
-            self.write_all(&build_message(
-                EXEC,
-                if stmt_id_in > 0 { stmt_id_in } else { 0 },
-                &exec_payload,
-            ))?;
-            return self.read_exec_response();
+            // No params: use execute() path directly
+            return self.execute(sql);
         }
 
-        // Use self.handle as statement handle (no separate allocation needed).
-        // NOTE: STATEMENT_PREPARE and READY share msg_type=3, so allocate_statement
-        // actually sends READY and parses garbage. The DM server manages statement
-        // handles server-side via the frame handle field.
         let stmt_id = self.handle;
 
-        // Step 3: EXEC(5) to PREPARE — simple format: sql + null terminator
+        // READY
+        self.write_all(&Frame::new(READY, 0, 0).encode())?;
+        self.read_message()?;
+
+        // EXEC to PREPARE
         let exec = ExecMessage::new(sql, 0);
-        let exec_payload = exec.encode_payload();
-        self.write_all(&build_message(EXEC, stmt_id, &exec_payload))?;
+        self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
+        let (exec_frame, exec_payload) = self.read_message()?;
+        eprintln!(
+            "DEBUG DML EXEC(5) resp: code={} type={} payload_len={} first32={:02?}",
+            exec_frame.response_code,
+            exec_frame.msg_type,
+            exec_payload.len(),
+            &exec_payload[..exec_payload.len().min(32)]
+        );
+        if exec_frame.response_code < 0 {
+            let msg = String::from_utf8_lossy(&exec_payload);
+            return Err(Error::QueryFailed(format!(
+                "prepare failed: code={} type={} payload={}",
+                exec_frame.response_code, exec_frame.msg_type, msg
+            )));
+        }
+
+        // LOB streaming for off-row params
+        self.stream_lob_params(stmt_id, params)?;
+
+        // BIND_EXEC2 with has_result_set=false — auto_commit in message=false
+        // We handle commit explicitly via do_commit() below
+        let bind_params = self.clear_off_row_placeholders(params);
+        let bind_exec2 = BindExec2Message::new(false, false, bind_params);
+        let bind_payload = bind_exec2.encode_payload();
+        eprintln!(
+            "DEBUG DML BIND_EXEC2(90): msg_auto_commit=false has_rs=false payload_len={} first48={:02?}",
+            bind_payload.len(),
+            &bind_payload[..bind_payload.len().min(48)]
+        );
+        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
+
+        let rs = self.read_exec_response()?;
+
+        // COMMIT if auto_commit
+        if self.auto_commit {
+            eprintln!(
+                "DEBUG: do_execute_dml_with_params COMMIT after DML, sql={:?}, rs.total_row_count={}",
+                sql, rs.total_row_count
+            );
+            self.do_commit()?;
+            eprintln!("DEBUG: COMMIT succeeded");
+        }
+
+        eprintln!(
+            "DEBUG: do_execute_dml_with_params returning total_row_count={}",
+            rs.total_row_count
+        );
+        Ok(rs.total_row_count)
+    }
+
+    /// Execute SELECT with bound params — does NOT commit.
+    fn do_query_with_params(&mut self, params: &[BindParam], sql: &str) -> Result<ResultSet> {
+        if params.is_empty() {
+            return self.query(sql);
+        }
+
+        let stmt_id = self.handle;
+
+        // READY
+        self.write_all(&Frame::new(READY, 0, 0).encode())?;
+        self.read_message()?;
+
+        // EXEC to PREPARE
+        let exec = ExecMessage::new(sql, 0);
+        self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
         let (exec_frame, exec_payload) = self.read_message()?;
         if exec_frame.response_code < 0 {
             let msg = String::from_utf8_lossy(&exec_payload);
@@ -394,50 +592,75 @@ impl Client {
             )));
         }
 
-        // Step 4: For LOB params > 2048 bytes, stream data BEFORE bind exec.
-        // DM protocol: send msg_type=14 chunks for each off-row LOB param,
-        // then send bind exec with empty placeholder for those params.
+        // LOB streaming for off-row params
+        self.stream_lob_params(stmt_id, params)?;
+
+        // BIND_EXEC2 with has_result_set=true
+        let bind_params = self.clear_off_row_placeholders(params);
+        let bind_exec2 = BindExec2Message::new(self.auto_commit, true, bind_params);
+        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_exec2.encode_payload()))?;
+
+        let rs = self.read_exec_response()?;
+        eprintln!(
+            "DEBUG: do_query_with_params result: sql={:?}, rows={}, columns={}, total_row_count={}",
+            sql,
+            rs.rows.len(),
+            rs.columns.len(),
+            rs.total_row_count
+        );
+        Ok(rs)
+    }
+
+    /// Stream LOB data for off-row params (BLOB/CLOB > 2048 bytes).
+    fn stream_lob_params(&mut self, stmt_id: u32, params: &[BindParam]) -> Result<()> {
         let off_row_params: Vec<usize> = params
             .iter()
             .enumerate()
             .filter(|(_, p)| {
-                let type_code = p.type_code;
-                let is_lob = type_code == 13 || type_code == 14; // BLOB=13, CLOB=14
+                let is_lob = p.type_code == 13 || p.type_code == 14;
                 is_lob && p.value.as_ref().map_or(false, |v| v.len() > 2048)
             })
             .map(|(i, _)| i)
             .collect();
 
-        if !off_row_params.is_empty() {
-            // Stream LOB data chunks for each off-row param
-            for &param_idx in &off_row_params {
-                let param = &params[param_idx];
-                if let Some(ref data) = param.value {
-                    let chunks = split_lob_data(data);
-                    for chunk in &chunks {
-                        let lob_msg = LobDataMessage::new(param_idx as i16, chunk.clone());
-                        let lob_payload = lob_msg.encode_payload(self.new_lob_flag);
-                        self.write_all(&build_message(DM_LOB_DATA_MSG_TYPE, stmt_id, &lob_payload))?;
-                        let (lob_frame, _) = self.read_message()?;
-                        if lob_frame.response_code < 0 {
-                            return Err(Error::QueryFailed(format!(
-                                "LOB stream failed for param {}: code={}",
-                                param_idx, lob_frame.response_code
-                            )));
-                        }
+        for &param_idx in &off_row_params {
+            let param = &params[param_idx];
+            if let Some(ref data) = param.value {
+                for chunk in &split_lob_data(data) {
+                    let lob_msg = LobDataMessage::new(param_idx as i16, chunk.clone());
+                    let lob_payload = lob_msg.encode_payload(self.new_lob_flag);
+                    self.write_all(&build_message(DM_LOB_DATA_MSG_TYPE, stmt_id, &lob_payload))?;
+                    let (lob_frame, _) = self.read_message()?;
+                    if lob_frame.response_code < 0 {
+                        return Err(Error::QueryFailed(format!(
+                            "LOB stream failed for param {}: code={}",
+                            param_idx, lob_frame.response_code
+                        )));
                     }
                 }
             }
         }
 
-        // Step 5: BIND_EXEC2(90) with params
-        // For off-row params, send empty placeholder value
-        let bind_params: Vec<BindParam> = params
+        Ok(())
+    }
+
+    /// Clone params, clearing value for off-row LOB placeholders.
+    fn clear_off_row_placeholders(&self, params: &[BindParam]) -> Vec<BindParam> {
+        let off_row_params: Vec<usize> = params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                let is_lob = p.type_code == 13 || p.type_code == 14;
+                is_lob && p.value.as_ref().map_or(false, |v| v.len() > 2048)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        params
             .iter()
             .enumerate()
             .map(|(i, p)| {
                 if off_row_params.contains(&i) {
-                    // Empty placeholder for off-row LOB params (data already streamed)
                     let mut modified = p.clone();
                     modified.value = Some(vec![]);
                     modified
@@ -445,20 +668,57 @@ impl Client {
                     p.clone()
                 }
             })
-            .collect();
+            .collect()
+    }
 
-        let bind_exec2 = BindExec2Message::new(
-            self.auto_commit,
-            has_result_set,
-            bind_params,
-        );
-        let bind_payload = bind_exec2.encode_payload();
-        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
+    /// Internal: execute SQL with pre-built BindParams (shared by sqlx/query builder modules).
+    pub(crate) fn do_execute_with_bind_params(
+        &mut self,
+        sql: &str,
+        has_result_set: bool,
+        params: &[BindParam],
+    ) -> Result<ResultSet> {
+        if params.is_empty() {
+            if has_result_set {
+                return self.query(sql);
+            } else {
+                self.execute(sql)?;
+                return Ok(ResultSet::new());
+            }
+        }
 
-        // Step 6: Read result
-        let rs = self.read_exec_response()?;
+        let stmt_id = self.handle;
 
-        Ok(rs)
+        // READY
+        self.write_all(&Frame::new(READY, 0, 0).encode())?;
+        self.read_message()?;
+
+        // EXEC to PREPARE
+        let exec = ExecMessage::new(sql, 0);
+        self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
+        let (exec_frame, exec_payload) = self.read_message()?;
+        if exec_frame.response_code < 0 {
+            let msg = String::from_utf8_lossy(&exec_payload);
+            return Err(Error::QueryFailed(format!(
+                "prepare failed: code={} type={} payload={}",
+                exec_frame.response_code, exec_frame.msg_type, msg
+            )));
+        }
+
+        // LOB streaming
+        self.stream_lob_params(stmt_id, params)?;
+
+        // BIND_EXEC2
+        let bind_params = self.clear_off_row_placeholders(params);
+        let bind_exec2 = BindExec2Message::new(self.auto_commit, has_result_set, bind_params);
+        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_exec2.encode_payload()))?;
+
+        // COMMIT if auto_commit and non-SELECT
+        if self.auto_commit && !has_result_set {
+            self.do_commit()?;
+        }
+
+        self.read_exec_response()
     }
 
     /// Set transaction isolation level.
@@ -490,6 +750,8 @@ impl Client {
     }
 
     /// Execute a SQL statement and return the number of affected rows.
+    /// Use for DML: INSERT, UPDATE, DELETE, CREATE, DROP, COMMIT, ROLLBACK.
+    /// When auto_commit is true (default), a COMMIT is sent after each statement.
     pub fn execute(&mut self, sql: &str) -> Result<u64> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
@@ -503,11 +765,8 @@ impl Client {
         let exec_payload = exec.encode_payload();
         self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
 
-        let (frame, payload) = self.read_message()?;
-        if frame.response_code < 0 {
-            let msg = String::from_utf8_lossy(&payload);
-            return Err(Error::QueryFailed(format!("{}: {}", frame.response_code, msg)));
-        }
+        // Parse the response to get actual affected row count
+        let rs = self.read_exec_response()?;
 
         // DM server doesn't auto-commit by default. When auto_commit is true,
         // send a COMMIT after each statement to match the expected behavior.
@@ -515,7 +774,7 @@ impl Client {
             self.do_commit()?;
         }
 
-        Ok(0)
+        Ok(rs.total_row_count)
     }
 
     /// Internal commit - sends the COMMIT protocol message.
