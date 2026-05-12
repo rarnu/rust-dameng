@@ -92,14 +92,14 @@ impl LobReadMessage {
         // pageNo (i32 LE)
         buf.put_i32_le(self.locator.page_no());
 
-        // curFileId (i16 LE) — initial value = fileId
-        buf.put_i16_le(self.locator.file_id());
+        // curFileId (i16 LE) — use cursor state for subsequent reads
+        buf.put_i16_le(self.locator.cur_file_id);
 
-        // curPageNo (i32 LE) — initial value = pageNo
-        buf.put_i32_le(self.locator.page_no());
+        // curPageNo (i32 LE) — use cursor state for subsequent reads
+        buf.put_i32_le(self.locator.cur_page_no);
 
-        // totalOffset (i32 LE) — accumulated offset
-        buf.put_i32_le(self.position);
+        // totalOffset (i32 LE) — accumulated offset from cursor
+        buf.put_i32_le(self.locator.total_offset);
 
         // position (i32 LE) — read start position
         buf.put_i32_le(self.position);
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn test_lob_locator_parsing() {
-        let loc = make_test_locator();
+        let mut loc = make_test_locator();
         assert_eq!(loc.blob_id(), 42);
         assert_eq!(loc.group_id(), 1);
         assert_eq!(loc.file_id(), 2);
@@ -426,11 +426,21 @@ mod tests {
         assert!(loc.has_extended());
         assert!(loc.is_clob);
         assert_eq!(loc.lob_flag(), 1);
+        // Cursor starts at 0
+        assert_eq!(loc.cur_file_id, 0);
+        assert_eq!(loc.cur_page_no, 0);
+        assert_eq!(loc.total_offset, 0);
+        // After init_cursor(), cursor = file_id/page_no
+        loc.init_cursor();
+        assert_eq!(loc.cur_file_id, 2);
+        assert_eq!(loc.cur_page_no, 100);
+        assert_eq!(loc.total_offset, 0);
     }
 
     #[test]
     fn test_lob_read_encode() {
-        let loc = make_test_locator();
+        let mut loc = make_test_locator();
+        loc.init_cursor();
         let msg = LobReadMessage::new(loc, 0, 1024, true);
         let payload = msg.encode_payload();
         // Base (41) + extended (16) = 57 bytes
@@ -473,5 +483,81 @@ mod tests {
         let resp = LobReadResponse::from_bytes(&resp_data).unwrap();
         assert!(resp.read_over);
         assert!(resp.data.is_empty());
+    }
+
+    #[test]
+    fn test_lob_cursor_update() {
+        let mut loc = make_test_locator();
+        loc.init_cursor();
+        assert_eq!(loc.cur_file_id, 2);
+        assert_eq!(loc.cur_page_no, 100);
+
+        // Simulate response from first LOBREAD
+        loc.update_cursor(2, 101, 1024);
+        assert_eq!(loc.cur_file_id, 2);
+        assert_eq!(loc.cur_page_no, 101);
+        assert_eq!(loc.total_offset, 1024);
+
+        // Simulate response from second LOBREAD
+        loc.update_cursor(3, 200, 2048);
+        assert_eq!(loc.cur_file_id, 3);
+        assert_eq!(loc.cur_page_no, 200);
+        assert_eq!(loc.total_offset, 2048);
+    }
+
+    #[test]
+    fn test_lob_free_encode() {
+        let loc = make_test_locator();
+        let free_msg = LobFreeMessage::new(loc);
+        let payload = free_msg.encode_payload(true);
+        // lobFlag(1) + blobId(8) + groupId(2) + fileId(2) + pageNo(4) = 17
+        // + tabId(4) + colId(2) + rowId(8) + exGroupId(2) + exFileId(2) + exPageNo(4) = 22
+        // Total = 39
+        assert_eq!(payload.len(), 39);
+        assert_eq!(payload[0], 1); // CLOB
+    }
+
+    #[test]
+    fn test_lob_free_encode_no_extended() {
+        let loc = make_test_locator();
+        let free_msg = LobFreeMessage::new(loc);
+        let payload = free_msg.encode_payload(false);
+        // lobFlag(1) + blobId(8) + groupId(2) + fileId(2) + pageNo(4) = 17
+        assert_eq!(payload.len(), 17);
+    }
+
+    #[test]
+    fn test_lob_getlen_encode() {
+        let loc = make_test_locator();
+        let getlen_msg = LobGetLenMessage::new(loc);
+        let payload = getlen_msg.encode_payload(true);
+        // lobFlag(1) + blobId(8) + groupId(2) + fileId(2) + pageNo(4) + tabId(4) + colId(2) + rowId(8) = 31
+        // + exGroupId(2) + exFileId(2) + exPageNo(4) = 8
+        // Total = 39
+        assert_eq!(payload.len(), 39);
+    }
+
+    #[test]
+    fn test_lob_getlen_response_parse() {
+        let resp_data = 2048i32.to_le_bytes();
+        let resp = LobGetLenResponse::from_bytes(&resp_data).unwrap();
+        assert_eq!(resp.length, 2048);
+    }
+
+    #[test]
+    fn test_lob_read_response_with_char_len() {
+        // readOver=0, dataLen=5, curFileId=2, curPageNo=101, totalOffset=5, data="HELLO", charLen=5
+        let mut resp_data = vec![0u8; 29];
+        resp_data[0] = 0; // readOver = false
+        resp_data[1..5].copy_from_slice(&5i32.to_le_bytes()); // dataLen
+        resp_data[5..7].copy_from_slice(&2i16.to_le_bytes()); // curFileId
+        resp_data[7..11].copy_from_slice(&101i32.to_le_bytes()); // curPageNo
+        resp_data[11..15].copy_from_slice(&5i32.to_le_bytes()); // totalOffset
+        resp_data[15..20].copy_from_slice(b"HELLO");
+        resp_data[20..24].copy_from_slice(&5i32.to_le_bytes()); // charLen
+        let resp = LobReadResponse::from_bytes(&resp_data).unwrap();
+        assert!(!resp.read_over);
+        assert_eq!(resp.data, b"HELLO");
+        assert_eq!(resp.char_len, 5);
     }
 }

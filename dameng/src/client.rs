@@ -886,21 +886,18 @@ impl Client {
         let max_chunk = if locator.is_clob { 8192 } else { 16384 };
 
         let mut result = Vec::with_capacity(total_len);
-        let mut position: usize = 0;
-        // Copy locator to track cursor position across reads
+        let mut position: i32 = 0;
+        // Clone locator and initialize cursor for LOBREAD
         let mut cur_locator = locator.clone();
+        cur_locator.init_cursor();
 
-        while position < total_len {
-            let remaining = total_len - position;
+        while (position as usize) < total_len {
+            let remaining = total_len - position as usize;
             let chunk_size = std::cmp::min(remaining, max_chunk) as i32;
 
-            // Send READY before LOBREAD (DM protocol requirement)
-            let ready_frame = Frame::new(READY, 0, 0);
-            self.write_all(&ready_frame.encode())?;
-            self.read_message()?;
-
+            // Send LOBREAD
             let read_msg =
-                LobReadMessage::new(cur_locator.clone(), position as i32, chunk_size, self.new_lob_flag);
+                LobReadMessage::new(cur_locator.clone(), position, chunk_size, self.new_lob_flag);
             let read_payload = read_msg.encode_payload();
             self.write_all(&build_message(LOB_READ, self.handle, &read_payload))?;
             let (read_frame, read_resp_payload) = self.read_message()?;
@@ -917,10 +914,16 @@ impl Client {
             }
 
             result.extend_from_slice(&read_resp.data);
-            position += read_resp.data.len();
 
-            // Update cursor for next read
-            cur_locator = cur_locator.clone();
+            // For CLOB: advance by character count (charLen if available)
+            if locator.is_clob && read_resp.char_len > 0 {
+                position += read_resp.char_len as i32;
+            } else {
+                position += read_resp.data.len() as i32;
+            }
+
+            // Update cursor state from response for next LOBREAD
+            cur_locator.update_cursor(read_resp.cur_file_id, read_resp.cur_page_no, read_resp.total_offset);
 
             if read_resp.read_over {
                 break;
@@ -928,6 +931,30 @@ impl Client {
         }
 
         Ok(result)
+    }
+
+    /// Free a LOB locator on the server via LOBFREE (msg_type=29).
+    ///
+    /// After reading a LOB's data, this releases the server-side LOB handle.
+    /// This is especially important for long-lived connections where LOB
+    /// handles could accumulate on the server.
+    pub fn free_lob(&mut self, locator: &dameng_types::LobLocator) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        let free_msg = LobFreeMessage::new(locator.clone());
+        let free_payload = free_msg.encode_payload(self.new_lob_flag);
+        self.write_all(&build_message(LOB_FREE, self.handle, &free_payload))?;
+        let (free_frame, _) = self.read_message()?;
+        if free_frame.response_code < 0 {
+            return Err(Error::QueryFailed(format!(
+                "LOBFREE failed: code={} type={}",
+                free_frame.response_code, free_frame.msg_type
+            )));
+        }
+
+        Ok(())
     }
 }
 

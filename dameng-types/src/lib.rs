@@ -194,6 +194,12 @@ pub struct LobLocator {
     /// Column ID from column metadata.
     /// Used by LOBREAD protocol to locate the LOB data on the server.
     pub col_id: i16,
+    /// Current file ID for LOBREAD cursor tracking. Updated after each read.
+    pub cur_file_id: i16,
+    /// Current page number for LOBREAD cursor tracking. Updated after each read.
+    pub cur_page_no: i32,
+    /// Accumulated offset for LOBREAD cursor tracking. Updated after each read.
+    pub total_offset: i32,
 }
 
 impl LobLocator {
@@ -262,6 +268,9 @@ impl LobLocator {
             is_clob,
             tab_id,
             col_id,
+            cur_file_id: 0,
+            cur_page_no: 0,
+            total_offset: 0,
         }
     }
 
@@ -371,6 +380,29 @@ impl LobLocator {
     /// Check if extended section is present (NewLobFlag).
     pub fn has_extended(&self) -> bool {
         self.raw.len() >= Self::EX_TABLE_ID + 4
+    }
+
+    /// Update the cursor state from a LOBREAD response.
+    ///
+    /// After each LOBREAD, the server returns updated `curFileId`, `curPageNo`,
+    /// and `totalOffset` values. This method updates the locator so subsequent
+    /// reads continue from the correct position.
+    ///
+    /// This is a mutable reference — clone the locator before calling this
+    /// if you need to preserve the original.
+    pub fn update_cursor(&mut self, cur_file_id: i16, cur_page_no: i32, total_offset: i32) {
+        self.cur_file_id = cur_file_id;
+        self.cur_page_no = cur_page_no;
+        self.total_offset = total_offset;
+    }
+
+    /// Initialize cursor from the initial LOB locator values.
+    ///
+    /// On the first read, `curFileId` = `fileId` and `curPageNo` = `pageNo`.
+    pub fn init_cursor(&mut self) {
+        self.cur_file_id = self.file_id();
+        self.cur_page_no = self.page_no();
+        self.total_offset = 0;
     }
 }
 
