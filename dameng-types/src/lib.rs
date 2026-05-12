@@ -133,49 +133,193 @@ pub enum DmValue {
 /// used with LOBREAD protocol messages to fetch the actual content.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LobLocator {
-    /// Raw 16-byte locator from DM server.
-    pub raw: [u8; 16],
+    /// Raw NBLOB_HEAD bytes from DM server (may be >16 for new LOB format).
+    pub raw: Vec<u8>,
     /// Whether this is a CLOB (true) or BLOB (false).
     pub is_clob: bool,
+    /// Table ID from column metadata or NBLOB_HEAD extended section.
+    /// Used by LOBREAD protocol to locate the LOB data on the server.
+    pub tab_id: i32,
+    /// Column ID from column metadata.
+    /// Used by LOBREAD protocol to locate the LOB data on the server.
+    pub col_id: i16,
 }
 
 impl LobLocator {
-    /// Create a new LOB locator from raw bytes.
-    pub fn new(raw: [u8; 16], is_clob: bool) -> Self {
-        Self { raw, is_clob }
+    /// NBLOB_HEAD offsets (matching dm_go constants).
+    /// NBLOB_HEAD_IN_ROW_FLAG = 0 (1 byte)
+    /// NBLOB_HEAD_BLOBID = 1 (8 bytes)
+    /// NBLOB_HEAD_BLOB_LEN = 9 (4 bytes)
+    /// NBLOB_HEAD_OUTROW_GROUPID = 13 (2 bytes - USINT)
+    /// NBLOB_HEAD_OUTROW_FILEID = 15 (2 bytes - USINT)
+    /// NBLOB_HEAD_OUTROW_PAGENO = 17 (4 bytes - ULINT)
+    /// NBLOB_EX_HEAD_TABLE_ID = 21 (4 bytes - ULINT)
+    /// NBLOB_EX_HEAD_COL_ID = 25 (2 bytes - USINT)
+    /// NBLOB_EX_HEAD_ROW_ID = 27 (8 bytes - DDWORD)
+    /// NBLOB_EX_HEAD_FPA_GRPID = 35 (2 bytes - USINT)
+    /// NBLOB_EX_HEAD_FPA_FILEID = 37 (2 bytes - USINT)
+    /// NBLOB_EX_HEAD_FPA_PAGENO = 39 (4 bytes - ULINT)
+    const IN_ROW_FLAG: usize = 0;
+    const BLOBID: usize = 1;
+    const BLOB_LEN: usize = 9;
+    const GROUPID: usize = 13;
+    const FILEID: usize = 15;
+    const PAGENO: usize = 17;
+    const EX_TABLE_ID: usize = 21;
+    const EX_COL_ID: usize = 25;
+    const EX_ROW_ID: usize = 27;
+    const EX_FPA_GRPID: usize = 35;
+    const EX_FPA_FILEID: usize = 37;
+    const EX_FPA_PAGENO: usize = 39;
+
+    /// Create a LOB locator from NBLOB_HEAD raw bytes returned by DM server.
+    ///
+    /// NBLOB_HEAD layout (out-of-row):
+    /// - Off 0:  in_row_flag (1 byte, 0x02 = out-of-row)
+    /// - Off 1:  blob_id (8 bytes LE i64)
+    /// - Off 9:  group_id (2 bytes LE i16)
+    /// - Off 11: file_id (2 bytes LE i16)
+    /// - Off 13: page_no (4 bytes LE i32)
+    /// - Off 17: (extended section if present)
+    /// - Off 21: tab_id (4 bytes LE i32)
+    /// - Off 25: col_id (2 bytes LE i16)
+    /// - Off 27: row_id (8 bytes LE i64)
+    ///
+    /// tab_id and col_id can also come from the column metadata in the
+    /// EXEC_RESPONSE header (parsed separately), in which case use
+    /// `with_tab_col_id()` to set them.
+    pub fn from_nblob_head(data: Vec<u8>, is_clob: bool) -> Self {
+        let mut tab_id = 0;
+        let mut col_id = 0;
+
+        // Try to extract tab_id/col_id from extended NBLOB_HEAD section
+        if data.len() >= 29 {
+            tab_id = i32::from_le_bytes([
+                data[Self::EX_TABLE_ID],
+                data[Self::EX_TABLE_ID + 1],
+                data[Self::EX_TABLE_ID + 2],
+                data[Self::EX_TABLE_ID + 3],
+            ]);
+            col_id = i16::from_le_bytes([
+                data[Self::EX_COL_ID],
+                data[Self::EX_COL_ID + 1],
+            ]);
+        }
+
+        Self {
+            raw: data,
+            is_clob,
+            tab_id,
+            col_id,
+        }
     }
 
-    /// Check if this is an "in-row" locator (small data, embedded in row).
-    /// Go driver checks byte 0 against a flag byte to determine in-row vs out-row.
-    pub fn is_in_row(&self) -> bool {
-        // NBLOB_HEAD_IN_ROW_FLAG check: Go uses dm_build_1036(offset=0)
-        // In-row flag byte is compared against LOB_IN_ROW constant.
-        // Based on Go driver: inRow = byte[0] & flag == LOB_IN_ROW
-        // For now, 16-byte locators are always out-row by definition.
-        false
+    /// Set tab_id/col_id from column metadata (overrides NBLOB_HEAD values).
+    /// This is called by the response parser after reading the column header.
+    pub fn with_tab_col_id(mut self, tab_id: i32, col_id: i16) -> Self {
+        self.tab_id = tab_id;
+        self.col_id = col_id;
+        self
     }
 
-    /// Get the blobId (8 bytes, big-endian) from the locator.
+    /// Get the lob_flag value: 0 = BLOB (byte), 1 = CLOB (char).
+    pub fn lob_flag(&self) -> u8 {
+        if self.is_clob { 1 } else { 0 }
+    }
+
+    /// Get the blob_id from the NBLOB_HEAD format (offset 1, 8 bytes LE).
     pub fn blob_id(&self) -> i64 {
-        // NBLOB_HEAD_BLOBID offset in Go driver
-        // Based on Go: blobId = Dm_build_1050(value, NBLOB_HEAD_BLOBID)
-        // 1050 reads 8 bytes (int64 LE)
-        let bytes: [u8; 8] = self.raw[0..8].try_into().unwrap();
-        i64::from_le_bytes(bytes)
+        if self.raw.len() >= Self::BLOBID + 8 {
+            let bytes: [u8; 8] = self.raw[Self::BLOBID..Self::BLOBID + 8].try_into().unwrap();
+            i64::from_le_bytes(bytes)
+        } else {
+            0
+        }
     }
 
-    /// Get the group ID (4 bytes) for out-row locators.
-    pub fn group_id(&self) -> i32 {
-        // NBLOB_HEAD_OUTROW_GROUPID offset
-        let bytes: [u8; 4] = self.raw[8..12].try_into().unwrap();
-        i32::from_le_bytes(bytes)
+    /// Get the group ID for out-of-row locators (offset 13, 2 bytes LE i16).
+    pub fn group_id(&self) -> i16 {
+        if self.raw.len() >= Self::GROUPID + 2 {
+            i16::from_le_bytes([
+                self.raw[Self::GROUPID],
+                self.raw[Self::GROUPID + 1],
+            ])
+        } else {
+            -1
+        }
     }
 
-    /// Get the file ID (4 bytes) for out-row locators.
-    pub fn file_id(&self) -> i32 {
-        // NBLOB_HEAD_OUTROW_FILEID offset
-        let bytes: [u8; 4] = self.raw[12..16].try_into().unwrap();
-        i32::from_le_bytes(bytes)
+    /// Get the file ID for out-of-row locators (offset 15, 2 bytes LE i16).
+    pub fn file_id(&self) -> i16 {
+        if self.raw.len() >= Self::FILEID + 2 {
+            i16::from_le_bytes([
+                self.raw[Self::FILEID],
+                self.raw[Self::FILEID + 1],
+            ])
+        } else {
+            -1
+        }
+    }
+
+    /// Get the page number for out-of-row locators (offset 17, 4 bytes LE i32).
+    pub fn page_no(&self) -> i32 {
+        if self.raw.len() >= Self::PAGENO + 4 {
+            let bytes: [u8; 4] = self.raw[Self::PAGENO..Self::PAGENO + 4].try_into().unwrap();
+            i32::from_le_bytes(bytes)
+        } else {
+            -1
+        }
+    }
+
+    /// Get the row_id from extended section (offset 27, 8 bytes LE i64).
+    pub fn row_id(&self) -> i64 {
+        if self.raw.len() >= Self::EX_ROW_ID + 8 {
+            let bytes: [u8; 8] = self.raw[Self::EX_ROW_ID..Self::EX_ROW_ID + 8].try_into().unwrap();
+            i64::from_le_bytes(bytes)
+        } else {
+            0
+        }
+    }
+
+    /// Get the extended group ID (offset 35, 2 bytes LE i16).
+    pub fn ex_group_id(&self) -> i16 {
+        if self.raw.len() >= Self::EX_FPA_GRPID + 2 {
+            i16::from_le_bytes([
+                self.raw[Self::EX_FPA_GRPID],
+                self.raw[Self::EX_FPA_GRPID + 1],
+            ])
+        } else {
+            0
+        }
+    }
+
+    /// Get the extended file ID (offset 37, 2 bytes LE i16).
+    pub fn ex_file_id(&self) -> i16 {
+        if self.raw.len() >= Self::EX_FPA_FILEID + 2 {
+            i16::from_le_bytes([
+                self.raw[Self::EX_FPA_FILEID],
+                self.raw[Self::EX_FPA_FILEID + 1],
+            ])
+        } else {
+            0
+        }
+    }
+
+    /// Get the extended page number (offset 39, 4 bytes LE i32).
+    pub fn ex_page_no(&self) -> i32 {
+        if self.raw.len() >= Self::EX_FPA_PAGENO + 4 {
+            let bytes: [u8; 4] = self.raw[Self::EX_FPA_PAGENO..Self::EX_FPA_PAGENO + 4]
+                .try_into()
+                .unwrap();
+            i32::from_le_bytes(bytes)
+        } else {
+            0
+        }
+    }
+
+    /// Check if extended section is present (NewLobFlag).
+    pub fn has_extended(&self) -> bool {
+        self.raw.len() >= Self::EX_TABLE_ID + 4
     }
 }
 
@@ -300,7 +444,13 @@ pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
 }
 
 /// Decode DM protocol bytes to a Rust value.
-pub fn decode_value(ty: DmValueType, data: &[u8]) -> Option<DmValue> {
+///
+/// # Arguments
+/// * `ty` - The DM value type
+/// * `data` - The raw bytes to decode
+/// * `lob_meta` - Optional LOB column metadata (tab_id, col_id). Used to populate
+///   the LobLocator when decoding out-of-row BLOB/CLOB values.
+pub fn decode_value(ty: DmValueType, data: &[u8], lob_meta: Option<(i32, i16)>) -> Option<DmValue> {
     if data.is_empty() {
         return Some(DmValue::Null);
     }
@@ -357,10 +507,37 @@ pub fn decode_value(ty: DmValueType, data: &[u8]) -> Option<DmValue> {
             String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
         }
         DmValueType::CLOB => {
-            // Check for LOB_LOCATOR (16 bytes) - large CLOB data
-            if data.len() == 16 {
-                let raw: [u8; 16] = data.try_into().ok()?;
-                Some(DmValue::LobLocator(LobLocator::new(raw, true)))
+            // DM returns NBLOB_HEAD format for CLOB values:
+            // - in_row=0x01: inline data follows (13-byte header: flag(1) + blob_id(8) + blob_len(4) + data)
+            // - in_row=0x02: out-of-row LOB locator (needs LOBREAD protocol)
+            // - legacy: exactly 16 bytes (old LOB_LOCATOR format)
+            if data.len() >= 13 && data[0] == 0x01 {
+                // Inline LOB data - extract actual content
+                let blob_len = if data.len() >= 13 {
+                    u32::from_le_bytes([data[9], data[10], data[11], data[12]]) as usize
+                } else {
+                    0
+                };
+                if 13 + blob_len <= data.len() {
+                    let inline_data = &data[13..13 + blob_len];
+                    String::from_utf8(inline_data.to_vec()).ok().map(DmValue::Text)
+                } else {
+                    None
+                }
+            } else if data.len() >= 13 && data[0] == 0x02 {
+                // Out-of-row CLOB locator
+                let mut loc = LobLocator::from_nblob_head(data.to_vec(), true);
+                if let Some((tab_id, col_id)) = lob_meta {
+                    loc = loc.with_tab_col_id(tab_id, col_id);
+                }
+                Some(DmValue::LobLocator(loc))
+            } else if data.len() == 16 {
+                // Legacy 16-byte LOB_LOCATOR format
+                let mut loc = LobLocator::from_nblob_head(data.to_vec(), true);
+                if let Some((tab_id, col_id)) = lob_meta {
+                    loc = loc.with_tab_col_id(tab_id, col_id);
+                }
+                Some(DmValue::LobLocator(loc))
             } else {
                 String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
             }
@@ -369,10 +546,35 @@ pub fn decode_value(ty: DmValueType, data: &[u8]) -> Option<DmValue> {
             Some(DmValue::Bytea(data.to_vec()))
         }
         DmValueType::BLOB => {
-            // Check for LOB_LOCATOR (16 bytes) - large BLOB data
-            if data.len() == 16 {
-                let raw: [u8; 16] = data.try_into().ok()?;
-                Some(DmValue::LobLocator(LobLocator::new(raw, false)))
+            // DM returns NBLOB_HEAD format for BLOB values (same as CLOB):
+            // - in_row=0x01: inline data follows
+            // - in_row=0x02: out-of-row LOB locator
+            if data.len() >= 13 && data[0] == 0x01 {
+                // Inline BLOB data
+                let blob_len = if data.len() >= 13 {
+                    u32::from_le_bytes([data[9], data[10], data[11], data[12]]) as usize
+                } else {
+                    0
+                };
+                if 13 + blob_len <= data.len() {
+                    Some(DmValue::Bytea(data[13..13 + blob_len].to_vec()))
+                } else {
+                    None
+                }
+            } else if data.len() >= 13 && data[0] == 0x02 {
+                // Out-of-row BLOB locator
+                let mut loc = LobLocator::from_nblob_head(data.to_vec(), false);
+                if let Some((tab_id, col_id)) = lob_meta {
+                    loc = loc.with_tab_col_id(tab_id, col_id);
+                }
+                Some(DmValue::LobLocator(loc))
+            } else if data.len() == 16 {
+                // Legacy 16-byte LOB_LOCATOR format
+                let mut loc = LobLocator::from_nblob_head(data.to_vec(), false);
+                if let Some((tab_id, col_id)) = lob_meta {
+                    loc = loc.with_tab_col_id(tab_id, col_id);
+                }
+                Some(DmValue::LobLocator(loc))
             } else {
                 Some(DmValue::Bytea(data.to_vec()))
             }
@@ -488,7 +690,7 @@ mod tests {
         let val = DmValue::Int(42);
         let encoded = encode_value(DmValueType::INT, &val);
         assert_eq!(encoded, vec![42, 0, 0, 0]);
-        let decoded = decode_value(DmValueType::INT, &encoded).unwrap();
+        let decoded = decode_value(DmValueType::INT, &encoded, None).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -497,7 +699,7 @@ mod tests {
         let val = DmValue::BigInt(1000);
         let encoded = encode_value(DmValueType::BIGINT, &val);
         assert_eq!(encoded, vec![0xE8, 0x03, 0, 0, 0, 0, 0, 0]);
-        let decoded = decode_value(DmValueType::BIGINT, &encoded).unwrap();
+        let decoded = decode_value(DmValueType::BIGINT, &encoded, None).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -506,7 +708,7 @@ mod tests {
         let val = DmValue::Text("hello".to_string());
         let encoded = encode_value(DmValueType::VARCHAR, &val);
         assert_eq!(encoded, b"hello");
-        let decoded = decode_value(DmValueType::VARCHAR, &encoded).unwrap();
+        let decoded = decode_value(DmValueType::VARCHAR, &encoded, None).unwrap();
         assert_eq!(decoded, val);
     }
 
@@ -515,13 +717,13 @@ mod tests {
         let val = DmValue::Boolean(true);
         let encoded = encode_value(DmValueType::BIT, &val);
         assert_eq!(encoded, vec![1]);
-        let decoded = decode_value(DmValueType::BIT, &encoded).unwrap();
+        let decoded = decode_value(DmValueType::BIT, &encoded, None).unwrap();
         assert_eq!(decoded, val);
     }
 
     #[test]
     fn test_decode_empty() {
-        let result = decode_value(DmValueType::INT, &[]);
+        let result = decode_value(DmValueType::INT, &[], None);
         assert_eq!(result, Some(DmValue::Null));
     }
 
@@ -530,7 +732,7 @@ mod tests {
         let val = DmValue::Bytea(vec![0xDE, 0xAD, 0xBE, 0xEF]);
         let encoded = encode_value(DmValueType::BLOB, &val);
         assert_eq!(encoded, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-        let decoded = decode_value(DmValueType::BLOB, &encoded).unwrap();
+        let decoded = decode_value(DmValueType::BLOB, &encoded, None).unwrap();
         assert_eq!(decoded, val);
     }
 }

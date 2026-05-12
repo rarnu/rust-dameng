@@ -6,6 +6,7 @@ use std::net::TcpStream;
 use bytes::BytesMut;
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
+use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
 use dameng_protocol::message::bind::BindParam;
 
 use crate::error::{Error, Result};
@@ -35,8 +36,12 @@ pub struct Client {
     pub challenge: Vec<u8>,
     /// Auto-commit mode.
     pub auto_commit: bool,
+    /// Transaction isolation level.
+    pub isolation_level: IsolationLevel,
     /// Server encoding (1=UTF-8, 2=GB18030).
     pub encoding: u8,
+    /// Whether the server supports the extended LOB format (NewLobFlag).
+    pub new_lob_flag: bool,
 }
 
 impl Client {
@@ -50,7 +55,9 @@ impl Client {
             handle: 0,
             challenge: vec![],
             auto_commit: true,
+            isolation_level: IsolationLevel::ReadCommitted,
             encoding: 1,
+            new_lob_flag: false,
         }
     }
 
@@ -278,6 +285,34 @@ impl Client {
         let rs = self.read_exec_response()?;
 
         Ok(rs)
+    }
+
+    /// Set transaction isolation level.
+    ///
+    /// Sends a SET_ISOLATION (type 52) message to the DM server.
+    /// Supported levels: ReadUncommitted, ReadCommitted, RepeatableRead, Serializable.
+    pub fn set_isolation(&mut self, level: IsolationLevel) -> Result<()> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+        let msg = SetIsolationMessage::new(level);
+        let frame = msg.encode_frame(self.handle);
+        self.write_all(&frame)?;
+        let (frame, payload) = self.read_message()?;
+        if frame.response_code < 0 {
+            let msg = String::from_utf8_lossy(&payload);
+            return Err(Error::QueryFailed(format!(
+                "set isolation failed: code={} type={} payload={}",
+                frame.response_code, frame.msg_type, msg
+            )));
+        }
+        self.isolation_level = level;
+        Ok(())
+    }
+
+    /// Get current transaction isolation level.
+    pub fn get_isolation_level(&self) -> IsolationLevel {
+        self.isolation_level
     }
 
     /// Execute a SQL statement and return the number of affected rows.
@@ -530,6 +565,89 @@ impl Client {
         let _ = self.read_message();
         self.state = State::Closed;
         Ok(())
+    }
+
+    /// Read the full content of a LOB (CLOB/BLOB) identified by a locator.
+    ///
+    /// This method first gets the LOB length via LOBGETLEN (msg_type=31),
+    /// then reads the content in chunks via LOBREAD (msg_type=32).
+    ///
+    /// Returns `Ok(String)` for CLOB or `Ok(Vec<u8>)` for BLOB.
+    ///
+    /// **Important**: The LOB locator is only valid within the current transaction.
+    /// If auto_commit is enabled, the locator may be invalidated after the query
+    /// that produced it is committed. In that case, disable auto_commit before
+    /// calling this method.
+    pub fn read_lob(&mut self, locator: &dameng_types::LobLocator) -> Result<Vec<u8>> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        // Step 1: Get LOB length via LOBGETLEN (msg_type=31)
+        let getlen_msg = LobGetLenMessage::new(locator.clone());
+        let getlen_payload = getlen_msg.encode_payload(self.new_lob_flag);
+        self.write_all(&build_message(LOB_GETLEN, self.handle, &getlen_payload))?;
+        let (getlen_frame, getlen_resp_payload) = self.read_message()?;
+        if getlen_frame.response_code < 0 {
+            return Err(Error::QueryFailed(format!(
+                "LOBGETLEN failed: code={} type={}",
+                getlen_frame.response_code, getlen_frame.msg_type
+            )));
+        }
+        let getlen_resp = LobGetLenResponse::from_bytes(&getlen_resp_payload)?;
+        let total_len = getlen_resp.length as usize;
+
+        if total_len == 0 {
+            return Ok(vec![]);
+        }
+
+        // Step 2: Read LOB data in chunks via LOBREAD (msg_type=32)
+        // Max chunk: 16384 bytes for BLOB, 8192 chars for CLOB
+        let max_chunk = if locator.is_clob { 8192 } else { 16384 };
+
+        let mut result = Vec::with_capacity(total_len);
+        let mut position: usize = 0;
+        // Copy locator to track cursor position across reads
+        let mut cur_locator = locator.clone();
+
+        while position < total_len {
+            let remaining = total_len - position;
+            let chunk_size = std::cmp::min(remaining, max_chunk) as i32;
+
+            // Send READY before LOBREAD (DM protocol requirement)
+            let ready_frame = Frame::new(READY, 0, 0);
+            self.write_all(&ready_frame.encode())?;
+            self.read_message()?;
+
+            let read_msg =
+                LobReadMessage::new(cur_locator.clone(), position as i32, chunk_size, self.new_lob_flag);
+            let read_payload = read_msg.encode_payload();
+            self.write_all(&build_message(LOB_READ, self.handle, &read_payload))?;
+            let (read_frame, read_resp_payload) = self.read_message()?;
+            if read_frame.response_code < 0 {
+                return Err(Error::QueryFailed(format!(
+                    "LOBREAD failed at pos {}: code={} type={}",
+                    position, read_frame.response_code, read_frame.msg_type
+                )));
+            }
+            let read_resp = LobReadResponse::from_bytes(&read_resp_payload)?;
+
+            if read_resp.data.is_empty() {
+                break;
+            }
+
+            result.extend_from_slice(&read_resp.data);
+            position += read_resp.data.len();
+
+            // Update cursor for next read
+            cur_locator = cur_locator.clone();
+
+            if read_resp.read_over {
+                break;
+            }
+        }
+
+        Ok(result)
     }
 }
 

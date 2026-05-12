@@ -13,6 +13,8 @@ pub mod fetch;
 pub mod transaction;
 pub mod close;
 pub mod response;
+pub mod isolation;
+pub mod lob;
 
 pub use startup::*;
 pub use login::*;
@@ -23,6 +25,8 @@ pub use fetch::*;
 pub use transaction::*;
 pub use close::*;
 pub use response::*;
+pub use isolation::*;
+pub use lob::*;
 
 // Re-export msg_type constants at top level for convenience
 pub use self::msg_type::*;
@@ -74,6 +78,12 @@ pub mod msg_type {
     pub const SET_ISOLATION: u8 = 52;
     /// OPTIMIZED_PREPARE_EXEC - Optimized prepare-and-execute path (client->server)
     pub const OPTIMIZED_PREPARE_EXEC: u8 = 91;
+    /// LOB_FREE - Free a LOB locator (client->server)
+    pub const LOB_FREE: u8 = 29;
+    /// LOB_GETLEN - Get LOB length (client->server)
+    pub const LOB_GETLEN: u8 = 31;
+    /// LOB_READ - Read LOB data chunk (client->server)
+    pub const LOB_READ: u8 = 32;
 }
 
 /// DM data type codes.

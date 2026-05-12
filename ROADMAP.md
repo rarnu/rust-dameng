@@ -10,7 +10,7 @@
 
 ## HIGH 优先级
 
-### [ ] H1: LOB 读取实现 (LOBREAD 协议)
+### [🟡] H1: LOB 读取实现 (LOBREAD 协议) — 基础设施完成
 
 **问题**: CLOB/BLOB > 2048 字节时 DM 返回 16 字节 LOB_LOCATOR，但 Rust 驱动无法读取实际数据。
 
@@ -23,9 +23,9 @@
 **需要实现**:
 1. `dameng-protocol/src/message/lob.rs`: LOBREAD/LOBFREE 消息编码
 2. `dameng/src/client.rs`: `read_lob(lob_locator: &[u8], pos: i64, length: i32)` 方法
-3. `dameng-types/src/lib.rs`: `DmValue::LobLocator(Vec<u8>)` 变体
-4. `dameng-protocol/src/message/response.rs`: 解析时检测 16 字节 CLOB/BLOB 值 → 返回 LobLocator
-5. `dameng/examples/lob_read.rs`: CLOB/BLOB 读取示例
+3. `dameng-types/src/lib.rs`: `DmValue::LobLocator(LobLocator)` 变体 ✅
+4. `dameng-protocol/src/message/response.rs`: 解析时检测 16 字节 CLOB/BLOB 值 → 返回 LobLocator ✅
+5. `dameng/examples/test_lob_locator.rs`: LOB 检测测试示例 ✅
 
 **验收标准**:
 - 插入 > 2048 字节的 CLOB 数据，能正确读取回完整内容
@@ -211,7 +211,7 @@
 
 | ID | 描述 | 优先级 | 状态 | 完成日期 |
 |----|------|--------|------|----------|
-| H1 | LOB 读取实现 | HIGH | 🔴 未开始 | |
+| H1 | LOB 读取实现 | HIGH | 🟡 基础设施完成 (LobLocator + 检测), LOBREAD 待逆向 | |
 | H2 | GB18030 编码转换 | HIGH | 🔴 未开始 | |
 | M1 | 事务隔离级别 | MEDIUM | 🔴 未开始 | |
 | M2 | 连接参数扩展 | MEDIUM | 🔴 未开始 | |

@@ -60,6 +60,15 @@ pub fn is_lob_locator(data: &[u8], col_type_code: i32) -> bool {
     is_lob_type && data.len() == LOB_LOCATOR_SIZE
 }
 
+/// Check if the given raw data is an NBLOB_HEAD structure for the specified column type.
+/// DM returns NBLOB_HEAD for ALL CLOB/BLOB values (both inline and out-of-row).
+/// - in_row=0x01: inline data follows the header (13 bytes header + data)
+/// - in_row=0x02: out-of-row LOB (25+ bytes header, needs LOBREAD protocol)
+pub fn is_lob_head(data: &[u8], col_type_code: i32) -> bool {
+    let is_lob_type = matches!(col_type_code, 13 | 14);
+    is_lob_type && data.len() >= 13
+}
+
 
 use dameng_types::{DmValue, DmValueType};
 
@@ -126,6 +135,10 @@ pub struct Column {
     pub table_name: String,
     /// Schema name.
     pub schema_name: String,
+    /// LOB tab_id (only set for BLOB/CLOB columns).
+    pub lob_tab_id: i32,
+    /// LOB col_id (only set for BLOB/CLOB columns).
+    pub lob_col_id: i16,
 }
 
 /// A single row of data from a query result.
@@ -308,7 +321,12 @@ impl Row {
         }
         let col = columns.get(idx)?;
         let dm_ty = DmValueType::from_type_code(col.type_code)?;
-        dameng_types::decode_value(dm_ty, data)
+        dameng_types::decode_value(
+            dm_ty,
+            data,
+            matches!(dm_ty, DmValueType::BLOB | DmValueType::CLOB)
+                .then_some((col.lob_tab_id, col.lob_col_id)),
+        )
     }
 
     /// Get an i16 value at the given column index.
@@ -511,6 +529,8 @@ impl ExecResponse {
                 display_size: 0,
                 table_name,
                 schema_name,
+                lob_tab_id: 0,
+                lob_col_id: 0,
             });
         }
         // === Subsequent Columns ===
@@ -608,6 +628,30 @@ impl ExecResponse {
             // Always derive from type_name string instead.
             let actual_c_type = type_name_to_code(&c_type_name);
 
+            // Read itemFlag (offset 16-17 within the 32-byte header) to detect LOB columns.
+            // itemFlag bits: 0x01=identity, 0x02=lob, 0x04=readonly
+            let item_flag = u16::from_le_bytes([
+                data[header_off + 16],
+                data[header_off + 17],
+            ]);
+            let is_lob = (item_flag & 0x02) != 0;
+
+            // For LOB columns, DM appends lobTabId (i32 LE) + lobColId (i16 LE) after the strings.
+            let (c_lob_tab_id, c_lob_col_id) = if is_lob && offset + 6 <= data.len() {
+                let tab_id = i32::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                offset += 4;
+                let col_id = i16::from_le_bytes([data[offset], data[offset + 1]]);
+                offset += 2;
+                (tab_id, col_id)
+            } else {
+                (0, 0)
+            };
+
             columns.push(Column {
                 name: c_name,
                 type_code: actual_c_type,
@@ -618,6 +662,8 @@ impl ExecResponse {
                 display_size: 0,
                 table_name: c_table,
                 schema_name: c_schema,
+                lob_tab_id: c_lob_tab_id,
+                lob_col_id: c_lob_col_id,
             });
             parsed_cols += 1;
         }

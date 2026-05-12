@@ -71,6 +71,8 @@ mod tests {
                     display_size: 0,
                     table_name: "".to_string(),
                     schema_name: "".to_string(),
+                    lob_tab_id: 0,
+                    lob_col_id: 0,
                 },
                 Column {
                     name: "NAME".to_string(),
@@ -82,6 +84,8 @@ mod tests {
                     display_size: 0,
                     table_name: "".to_string(),
                     schema_name: "".to_string(),
+                    lob_tab_id: 0,
+                    lob_col_id: 0,
                 },
             ],
             rows: vec![],
@@ -121,6 +125,8 @@ mod tests {
             display_size: 0,
             table_name: "".to_string(),
             schema_name: "".to_string(),
+            lob_tab_id: 0,
+            lob_col_id: 0,
         }];
         let row = Row {
             row_id: 0,

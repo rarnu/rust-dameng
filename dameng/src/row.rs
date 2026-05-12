@@ -101,6 +101,8 @@ mod tests {
             display_size: 0,
             table_name: "".to_string(),
             schema_name: "".to_string(),
+            lob_tab_id: 0,
+            lob_col_id: 0,
         }];
         let row = Row {
             row_id: 0,

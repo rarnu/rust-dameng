@@ -313,6 +313,60 @@ fn main() {
         &mut f,
     );
 
+    // --- Isolation level tests ---
+    println!("\n=== Isolation Level Tests ===");
+    run(
+        "set_isolation: Serializable",
+        (|| {
+            let level = dameng::IsolationLevel::Serializable;
+            c.set_isolation(level).map_err(|e| e.to_string())?;
+            let got = c.get_isolation_level();
+            assert_eq!(got, level, "Expected Serializable, got {:?}", got);
+            Ok("ok".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    run(
+        "set_isolation: ReadUncommitted",
+        (|| {
+            let level = dameng::IsolationLevel::ReadUncommitted;
+            c.set_isolation(level).map_err(|e| e.to_string())?;
+            let got = c.get_isolation_level();
+            assert_eq!(got, level, "Expected ReadUncommitted, got {:?}", got);
+            Ok("ok".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    run(
+        "set_isolation: ReadCommitted",
+        (|| {
+            let level = dameng::IsolationLevel::ReadCommitted;
+            c.set_isolation(level).map_err(|e| e.to_string())?;
+            let got = c.get_isolation_level();
+            assert_eq!(got, level, "Expected ReadCommitted, got {:?}", got);
+            Ok("ok".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
+    run(
+        "set_isolation: RepeatableRead",
+        (|| {
+            let level = dameng::IsolationLevel::RepeatableRead;
+            c.set_isolation(level).map_err(|e| e.to_string())?;
+            let got = c.get_isolation_level();
+            assert_eq!(got, level, "Expected RepeatableRead, got {:?}", got);
+            Ok("ok".into())
+        })(),
+        &mut p,
+        &mut f,
+    );
+
     // Cleanup - DM doesn't support DDL inside transactions or IF EXISTS
     run(
         "DROP TABLE",
