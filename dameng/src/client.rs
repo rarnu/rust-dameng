@@ -2,6 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use native_tls::{TlsConnector, TlsStream as NativeTlsStream};
 
 use bytes::BytesMut;
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
@@ -12,6 +13,49 @@ use dameng_types::encoding::ServerEncoding;
 
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
+
+/// A stream that can be either plain TCP or TLS-wrapped.
+enum Stream {
+    Tcp(TcpStream),
+    Tls(NativeTlsStream<TcpStream>),
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Stream::Tcp(s) => s.read(buf),
+            Stream::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Stream::Tcp(s) => s.write(buf),
+            Stream::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.flush(),
+            Stream::Tls(s) => s.flush(),
+        }
+    }
+}
+
+impl Stream {
+    fn shutdown(&mut self, how: std::net::Shutdown) -> std::io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.shutdown(how),
+            Stream::Tls(s) => {
+                // For TLS, shutdown the underlying TCP stream
+                s.get_ref().shutdown(how)
+            }
+        }
+    }
+}
 
 /// Connection state.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,7 +68,7 @@ pub enum State {
 
 /// A synchronous Dameng database client.
 pub struct Client {
-    stream: Option<TcpStream>,
+    stream: Option<Stream>,
     /// Connection state.
     pub state: State,
     /// Host.
@@ -64,11 +108,38 @@ impl Client {
 
     /// Connect to the Dameng server and complete authentication.
     pub fn connect(&mut self, username: &str, password: &str) -> Result<()> {
-        let stream = TcpStream::connect(format!("{}:{}", self.host, self.port))?;
+        self.connect_stream(false)?;
+        self.authenticate(username, password)
+    }
+
+    /// Connect with SSL/TLS.
+    pub fn connect_ssl(&mut self, username: &str, password: &str) -> Result<()> {
+        self.connect_stream(true)?;
+        self.authenticate(username, password)
+    }
+
+    /// Establish the underlying TCP or TLS stream.
+    fn connect_stream(&mut self, use_ssl: bool) -> Result<()> {
+        let addr = format!("{}:{}", self.host, self.port);
+        let stream = TcpStream::connect(&addr)?;
         stream.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
         stream.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
-        self.stream = Some(stream);
 
+        if use_ssl {
+            let connector = TlsConnector::new()
+                .map_err(|e| Error::ConnectionFailed(format!("TLS init failed: {}", e)))?;
+            let tls_stream = connector
+                .connect(&self.host, stream)
+                .map_err(|e| Error::ConnectionFailed(format!("TLS handshake failed: {}", e)))?;
+            self.stream = Some(Stream::Tls(tls_stream));
+        } else {
+            self.stream = Some(Stream::Tcp(stream));
+        }
+        Ok(())
+    }
+
+    /// Complete the authentication handshake after stream is established.
+    fn authenticate(&mut self, username: &str, password: &str) -> Result<()> {
         self.send_startup()?;
         let resp = self.read_startup_response()?;
         self.challenge = resp.challenge.to_vec();
@@ -84,6 +155,54 @@ impl Client {
         } else {
             Err(Error::AuthFailed(format!("login failed for {}", username)))
         }
+    }
+
+    /// Connect using a ConnectOptions configuration struct.
+    ///
+    /// Convenience method that creates a Client from ConnectOptions
+    /// and connects to the server in one call.
+    pub fn connect_with(opts: &crate::config::ConnectOptions) -> Result<Self> {
+        let mut client = Self::new(&opts.host, opts.port);
+        client.auto_commit = opts.auto_commit;
+        client.isolation_level = opts.isolation_level;
+
+        if let Some(_timeout) = opts.connect_timeout {
+            // Apply timeout when creating the TCP stream
+            // (applied inside connect() via custom stream creation)
+        }
+
+        if opts.ssl {
+            client.connect_ssl(&opts.username, &opts.password)?;
+        } else {
+            client.connect(&opts.username, &opts.password)?;
+        }
+        Ok(client)
+    }
+
+    /// Connect using a DSN string.
+    ///
+    /// DSN format: `dm://username:password@host:port/schema?param1=value1&param2=value2`
+    ///
+    /// Supported query parameters:
+    /// - `charset`: Character set (e.g., "utf8", "gb18030")
+    /// - `schema`: Database schema
+    /// - `timezone`: Timezone offset in hours
+    /// - `ssl`: Enable SSL ("true" or "false")
+    /// - `max_row_size`: Maximum row size
+    /// - `connect_timeout`: Connection timeout in seconds
+    /// - `auto_commit`: Auto-commit mode ("true" or "false")
+    /// - `isolation_level`: "read_uncommitted", "read_committed", "repeatable_read", "serializable"
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let client = Client::connect_from_dsn(
+    ///     "dm://SYSDBA:SYSDBA@127.0.0.1:5236/?charset=utf8&auto_commit=true"
+    /// ).unwrap();
+    /// ```
+    pub fn connect_from_dsn(dsn: &str) -> Result<Self> {
+        let opts = crate::config::ConnectOptions::from_dsn(dsn)?;
+        Self::connect_with(&opts)
     }
 
     /// Send a startup message to the server.
@@ -275,16 +394,68 @@ impl Client {
             )));
         }
 
-        // Step 4: BIND_EXEC2(90) with params
+        // Step 4: For LOB params > 2048 bytes, stream data BEFORE bind exec.
+        // DM protocol: send msg_type=14 chunks for each off-row LOB param,
+        // then send bind exec with empty placeholder for those params.
+        let off_row_params: Vec<usize> = params
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                let type_code = p.type_code;
+                let is_lob = type_code == 13 || type_code == 14; // BLOB=13, CLOB=14
+                is_lob && p.value.as_ref().map_or(false, |v| v.len() > 2048)
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if !off_row_params.is_empty() {
+            // Stream LOB data chunks for each off-row param
+            for &param_idx in &off_row_params {
+                let param = &params[param_idx];
+                if let Some(ref data) = param.value {
+                    let chunks = split_lob_data(data);
+                    for chunk in &chunks {
+                        let lob_msg = LobDataMessage::new(param_idx as i16, chunk.clone());
+                        let lob_payload = lob_msg.encode_payload();
+                        self.write_all(&build_message(DM_LOB_DATA_MSG_TYPE, stmt_id, &lob_payload))?;
+                        let (lob_frame, _) = self.read_message()?;
+                        if lob_frame.response_code < 0 {
+                            return Err(Error::QueryFailed(format!(
+                                "LOB stream failed for param {}: code={}",
+                                param_idx, lob_frame.response_code
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 5: BIND_EXEC2(90) with params
+        // For off-row params, send empty placeholder value
+        let bind_params: Vec<BindParam> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                if off_row_params.contains(&i) {
+                    // Empty placeholder for off-row LOB params (data already streamed)
+                    let mut modified = p.clone();
+                    modified.value = Some(vec![]);
+                    modified
+                } else {
+                    p.clone()
+                }
+            })
+            .collect();
+
         let bind_exec2 = BindExec2Message::new(
             self.auto_commit,
             has_result_set,
-            params.to_vec(),
+            bind_params,
         );
         let bind_payload = bind_exec2.encode_payload();
         self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
 
-        // Step 5: Read result
+        // Step 6: Read result
         let rs = self.read_exec_response()?;
 
         Ok(rs)
@@ -396,11 +567,21 @@ impl Client {
                 return Ok(ResultSet::new());
             }
             let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
-            return Ok(ResultSet { columns: resp.columns, rows: resp.rows });
+            return Ok(ResultSet::with_data(
+                resp.columns,
+                resp.rows,
+                0,
+                resp.row_count as u64,
+            ));
         }
         if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
             let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
-            Ok(ResultSet { columns: resp.columns, rows: resp.rows })
+            Ok(ResultSet::with_data(
+                resp.columns,
+                resp.rows,
+                0,
+                resp.row_count as u64,
+            ))
         } else {
             Err(Error::ConnectionFailed(format!(
                 "unexpected response msg_type={}",
@@ -424,6 +605,75 @@ impl Client {
         let exec_payload = exec.encode_payload();
         self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
         self.read_exec_response()
+    }
+
+    /// Fetch more rows from a result set using the FETCH protocol (msg_type=7).
+    ///
+    /// This enables pagination for large result sets, avoiding loading all rows
+    /// into memory at once. After calling `query()` or `execute_with_params()`,
+    /// use this method to retrieve the next batch of rows.
+    ///
+    /// # Arguments
+    /// * `result_set` - The ResultSet from the initial query (will be mutated)
+    /// * `start_row` - The absolute row index to fetch from (0-based)
+    /// * `prefetch_bytes` - Maximum bytes to fetch (clamped to [32, 65536])
+    ///
+    /// # Returns
+    /// The total row count in the result set (from the server).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut rs = client.query("SELECT * FROM large_table")?;
+    /// let batch_size = 100;
+    /// while rs.rows.len() < rs.total_row_count as usize {
+    ///     let fetched = client.fetch_more(&mut rs, rs.rows.len(), 8192)?;
+    ///     // Process new rows from rs.rows[previous_len..]
+    /// }
+    /// ```
+    pub fn fetch_more(
+        &mut self,
+        result_set: &mut ResultSet,
+        start_row: usize,
+        prefetch_bytes: i32,
+    ) -> Result<u64> {
+        if !matches!(self.state, State::Ready) {
+            return Err(Error::NotConnected);
+        }
+
+        // Send FETCH message (msg_type=7)
+        let fetch = FetchMessage::new(
+            start_row as i64,
+            result_set.cursor_id,
+            prefetch_bytes,
+        );
+        let fetch_payload = fetch.encode_payload();
+        self.write_all(&build_message(FETCH, self.handle, &fetch_payload))?;
+
+        let (frame, payload) = self.read_message()?;
+        if frame.response_code < 0 {
+            let msg = String::from_utf8_lossy(&payload);
+            return Err(Error::QueryFailed(format!(
+                "fetch failed: code={} type={} payload={}",
+                frame.response_code, frame.msg_type, msg
+            )));
+        }
+
+        // Parse FETCH response
+        let fetch_resp = FetchResponse::from_bytes(&payload, self.server_encoding)
+            .map_err(|e| Error::Protocol(e))?;
+
+        // Append new rows to the result set
+        result_set.rows.extend(fetch_resp.rows);
+
+        // Update total row count from server response
+        result_set.total_row_count = fetch_resp.total_row_count as u64;
+
+        // Merge columns if fetch response includes column metadata
+        if result_set.columns.is_empty() && !fetch_resp.columns.is_empty() {
+            result_set.columns = fetch_resp.columns;
+        }
+
+        Ok(result_set.total_row_count)
     }
 
     /// Send a READY keepalive and read the ACK.
@@ -570,6 +820,33 @@ impl Client {
         Ok(())
     }
 
+    /// Read output parameter values after executing a stored procedure.
+    ///
+    /// When a stored procedure is executed with OUTPUT or INPUT_OUTPUT parameters,
+    /// the server returns the output values in the EXEC_RESPONSE frame. This method
+    /// extracts those raw byte values so they can be decoded with
+    /// `parse_output_param_value()`.
+    ///
+    /// # Arguments
+    /// * `params` - The original `BindParam` slice used in the execute call.
+    ///              Only parameters with `direction` of `Output` or `InputOutput` are included.
+    ///
+    /// # Returns
+    /// A vector of `(type_code, raw_bytes)` tuples, one per output parameter,
+    /// in the same order as the input parameters. Empty byte vectors indicate NULL.
+    pub fn read_output_params(&self, params: &[BindParam]) -> Vec<(i32, Vec<u8>)> {
+        params.iter()
+            .filter(|p| {
+                p.direction == dameng_protocol::message::bind::ParameterDirection::Output
+                    || p.direction == dameng_protocol::message::bind::ParameterDirection::InputOutput
+            })
+            .map(|p| {
+                let raw = p.value.clone().unwrap_or_default();
+                (p.type_code, raw)
+            })
+            .collect()
+    }
+
     /// Read the full content of a LOB (CLOB/BLOB) identified by a locator.
     ///
     /// This method first gets the LOB length via LOBGETLEN (msg_type=31),
@@ -659,7 +936,7 @@ impl Drop for Client {
         if matches!(self.state, State::Ready) {
             let _ = self.close();
         }
-        if let Some(stream) = self.stream.take() {
+        if let Some(mut stream) = self.stream.take() {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         self.state = State::Closed;

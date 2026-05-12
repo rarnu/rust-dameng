@@ -21,6 +21,8 @@ pub enum Error {
     AuthFailed(String),
     /// Server returned an error message.
     ServerError(i32, String),
+    /// LOB streaming operation failed (e.g. stream ended prematurely or invalid chunk).
+    LobStreamError(String),
 }
 
 impl fmt::Display for Error {
@@ -34,6 +36,7 @@ impl fmt::Display for Error {
             Error::Io(e) => write!(f, "IO error: {e}"),
             Error::AuthFailed(s) => write!(f, "auth failed: {s}"),
             Error::ServerError(code, msg) => write!(f, "server error {code}: {msg}"),
+            Error::LobStreamError(s) => write!(f, "LOB stream error: {s}"),
         }
     }
 }

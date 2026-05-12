@@ -16,12 +16,31 @@ pub struct ResultSet {
     pub columns: Vec<Column>,
     /// Row data.
     pub rows: Vec<Row>,
+    /// Result set cursor ID (from the initial query).
+    pub cursor_id: i16,
+    /// Total row count in the result set (from server).
+    pub total_row_count: u64,
 }
 
 impl ResultSet {
     /// Create a new empty result set.
     pub fn new() -> Self {
-        Self { columns: vec![], rows: vec![] }
+        Self {
+            columns: vec![],
+            rows: vec![],
+            cursor_id: 0,
+            total_row_count: 0,
+        }
+    }
+
+    /// Create a result set with the given data.
+    pub fn with_data(columns: Vec<Column>, rows: Vec<Row>, cursor_id: i16, total_row_count: u64) -> Self {
+        Self {
+            columns,
+            rows,
+            cursor_id,
+            total_row_count,
+        }
     }
 
     /// Check if the result set is empty.
@@ -47,6 +66,16 @@ impl ResultSet {
     /// Get column metadata by name.
     pub fn column_by_name(&self, name: &str) -> Option<&Column> {
         self.columns.iter().find(|c| c.name == name)
+    }
+
+    /// Check if there are more rows to fetch.
+    pub fn has_more(&self) -> bool {
+        self.rows.len() < self.total_row_count as usize
+    }
+
+    /// Get the next fetch start position.
+    pub fn next_fetch_start(&self) -> usize {
+        self.rows.len()
     }
 }
 

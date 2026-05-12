@@ -4,10 +4,12 @@
 //! Dameng database servers.
 
 pub mod client;
+pub mod config;
 pub mod error;
 pub mod row;
 
 pub use client::Client;
+pub use config::ConnectOptions;
 pub use error::{Error, Result};
 pub use row::Row;
 

@@ -10,6 +10,7 @@ dameng-protocol = { path = "../dameng-protocol" }
 dameng-types = { path = "../dameng-types" }
 bytes = "1"
 encoding_rs = "0.8"
+native-tls = "0.2"
 
 [dev-dependencies]
 tokio-dameng = { path = "../tokio-dameng" }

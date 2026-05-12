@@ -31,6 +31,18 @@ pub enum DmValueType {
     CHAR,          // 16
     BINARY,        // 17
     VARBINARY,     // 18
+    NUMERIC,       // 20 - alias for DECIMAL
+    BOOLEAN,       // 21 - alias for BIT
+    DATETIME,      // 22 - alias for TIMESTAMP
+    VARCHAR2,      // 23 - alias for VARCHAR
+    DATETIME2,     // 24 - alias for TIMESTAMP
+    TIME_TZ,       // 25 - time with time zone
+    DATETIME_TZ,   // 26 - timestamp with time zone
+    INTERVAL_YM,   // 27 - interval year to month
+    INTERVAL_DT,   // 28 - interval day to second
+    RAW,           // 29 - alias for BINARY
+    DATETIME2_TZ,  // 30 - timestamp2 with time zone
+    REAL,          // 31 - alias for FLOAT
 }
 
 impl DmValueType {
@@ -55,6 +67,18 @@ impl DmValueType {
             16 => Some(DmValueType::CHAR),
             17 => Some(DmValueType::BINARY),
             18 => Some(DmValueType::VARBINARY),
+            20 => Some(DmValueType::NUMERIC),
+            21 => Some(DmValueType::BOOLEAN),
+            22 => Some(DmValueType::DATETIME),
+            23 => Some(DmValueType::VARCHAR2),
+            24 => Some(DmValueType::DATETIME2),
+            25 => Some(DmValueType::TIME_TZ),
+            26 => Some(DmValueType::DATETIME_TZ),
+            27 => Some(DmValueType::INTERVAL_YM),
+            28 => Some(DmValueType::INTERVAL_DT),
+            29 => Some(DmValueType::RAW),
+            30 => Some(DmValueType::DATETIME2_TZ),
+            31 => Some(DmValueType::REAL),
             _ => None,
         }
     }
@@ -80,6 +104,18 @@ impl DmValueType {
             DmValueType::CHAR => 16,
             DmValueType::BINARY => 17,
             DmValueType::VARBINARY => 18,
+            DmValueType::NUMERIC => 20,
+            DmValueType::BOOLEAN => 21,
+            DmValueType::DATETIME => 22,
+            DmValueType::VARCHAR2 => 23,
+            DmValueType::DATETIME2 => 24,
+            DmValueType::TIME_TZ => 25,
+            DmValueType::DATETIME_TZ => 26,
+            DmValueType::INTERVAL_YM => 27,
+            DmValueType::INTERVAL_DT => 28,
+            DmValueType::RAW => 29,
+            DmValueType::DATETIME2_TZ => 30,
+            DmValueType::REAL => 31,
         }
     }
 
@@ -104,6 +140,18 @@ impl DmValueType {
             DmValueType::CHAR => "CHAR",
             DmValueType::BINARY => "BINARY",
             DmValueType::VARBINARY => "VARBINARY",
+            DmValueType::NUMERIC => "NUMERIC",
+            DmValueType::BOOLEAN => "BOOLEAN",
+            DmValueType::DATETIME => "DATETIME",
+            DmValueType::VARCHAR2 => "VARCHAR2",
+            DmValueType::DATETIME2 => "DATETIME2",
+            DmValueType::TIME_TZ => "TIME_TZ",
+            DmValueType::DATETIME_TZ => "DATETIME_TZ",
+            DmValueType::INTERVAL_YM => "INTERVAL_YM",
+            DmValueType::INTERVAL_DT => "INTERVAL_DT",
+            DmValueType::RAW => "RAW",
+            DmValueType::DATETIME2_TZ => "DATETIME2_TZ",
+            DmValueType::REAL => "REAL",
         }
     }
 }
@@ -392,7 +440,7 @@ pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
                 vec![0; 2]
             }
         }
-        DmValueType::DOUBLE | DmValueType::FLOAT => {
+        DmValueType::DOUBLE | DmValueType::FLOAT | DmValueType::REAL => {
             if let DmValue::Double(v) = value {
                 v.to_le_bytes().to_vec()
             } else if let DmValue::Float(v) = value {
@@ -401,28 +449,28 @@ pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
                 vec![0; 8]
             }
         }
-        DmValueType::BIT => {
+        DmValueType::BIT | DmValueType::BOOLEAN => {
             if let DmValue::Boolean(v) = value {
                 vec![if *v { 1 } else { 0 }]
             } else {
                 vec![0]
             }
         }
-        DmValueType::VARCHAR | DmValueType::CHAR | DmValueType::CLOB => {
+        DmValueType::VARCHAR | DmValueType::CHAR | DmValueType::CLOB | DmValueType::VARCHAR2 => {
             if let DmValue::Text(v) = value {
                 v.as_bytes().to_vec()
             } else {
                 vec![]
             }
         }
-        DmValueType::BLOB | DmValueType::BINARY | DmValueType::VARBINARY => {
+        DmValueType::BLOB | DmValueType::BINARY | DmValueType::VARBINARY | DmValueType::RAW => {
             if let DmValue::Bytea(v) = value {
                 v.clone()
             } else {
                 vec![]
             }
         }
-        DmValueType::DECIMAL => {
+        DmValueType::DECIMAL | DmValueType::NUMERIC => {
             if let DmValue::Decimal(v) = value {
                 v.to_string().as_bytes().to_vec()
             } else {
@@ -436,14 +484,182 @@ pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
                 vec![0]
             }
         }
-        DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP | DmValueType::INTERVAL => {
+        DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP
+        | DmValueType::DATETIME | DmValueType::DATETIME2 | DmValueType::TIME_TZ
+        | DmValueType::DATETIME_TZ | DmValueType::DATETIME2_TZ => {
             if let DmValue::Text(v) = value {
                 v.as_bytes().to_vec()
             } else {
                 vec![]
             }
         }
+        // Generic INTERVAL (type_code=15) — send as text, server parses it.
+        DmValueType::INTERVAL => {
+            if let DmValue::Text(v) = value {
+                v.as_bytes().to_vec()
+            } else {
+                vec![]
+            }
+        }
+        // INTERVAL_YM (type_code=27): year-month interval, 12 bytes.
+        // Binary layout: year(LE i32, 4) + month(LE i32, 4) + padding(4).
+        // Text input: "Y-M" (e.g., "1-2" = 1 year 2 months) or just "Y".
+        DmValueType::INTERVAL_YM => {
+            if let DmValue::Text(v) = value {
+                encode_interval_ym(v)
+            } else {
+                vec![0; 12]
+            }
+        }
+        // INTERVAL_DT (type_code=28): day-time interval, 24 bytes.
+        // Binary layout: day(LE i32, 4) + hour(LE i32, 4) + minute(LE i32, 4)
+        //                  + second(LE i32, 4) + nanoseconds(LE i64, 8).
+        // Text input: "D HH:MI:SS.FF" (e.g., "1 2:3:4.5" = 1 day, 2h 3m 4.5s)
+        //            or "HH:MI:SS.FF" (day defaults to 0).
+        DmValueType::INTERVAL_DT => {
+            if let DmValue::Text(v) = value {
+                encode_interval_dt(v)
+            } else {
+                vec![0; 24]
+            }
+        }
     }
+}
+
+/// Encode an INTERVAL YEAR TO MONTH text string to DM binary format (12 bytes).
+///
+/// Binary layout: year(LE i32, 4) + month(LE i32, 4) + padding(4 zero bytes).
+///
+/// Accepted text formats:
+/// - "Y-M"  (e.g., "1-2" = 1 year 2 months)
+/// - "+Y-M" or "-Y-M" for signed intervals
+/// - "Y"     (months default to 0)
+fn encode_interval_ym(s: &str) -> Vec<u8> {
+    let mut year: i32 = 0;
+    let mut month: i32 = 0;
+
+    let trimmed = s.trim();
+    let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('+') {
+        (1i32, stripped.trim())
+    } else if let Some(stripped) = trimmed.strip_prefix('-') {
+        (-1, stripped.trim())
+    } else {
+        (1, trimmed)
+    };
+
+    if let Some((y_str, m_str)) = rest.split_once('-') {
+        if let Ok(y) = y_str.trim().parse::<i32>() {
+            year = y;
+        }
+        if let Ok(m) = m_str.trim().parse::<i32>() {
+            month = m;
+        }
+    } else if let Ok(y) = rest.trim().parse::<i32>() {
+        year = y;
+    }
+
+    let mut buf = Vec::with_capacity(12);
+    buf.extend_from_slice(&(year * sign).to_le_bytes());
+    buf.extend_from_slice(&(month * sign).to_le_bytes());
+    buf.extend_from_slice(&[0, 0, 0, 0]);
+    buf
+}
+
+/// Encode an INTERVAL DAY TO SECOND text string to DM binary format (24 bytes).
+///
+/// Binary layout: day(LE i32, 4) + hour(LE i32, 4) + minute(LE i32, 4)
+///                  + second(LE i32, 4) + nanoseconds(LE i64, 8).
+///
+/// Accepted text formats:
+/// - "D HH:MI:SS.FF"   (e.g., "1 2:3:4.5" = 1 day, 2h 3m 4.5s)
+/// - "HH:MI:SS.FF"     (day defaults to 0)
+/// - "+D HH:MI:SS.FF" or "-D HH:MI:SS.FF" for signed intervals
+fn encode_interval_dt(s: &str) -> Vec<u8> {
+    let mut day: i32 = 0;
+    let mut hour: i32 = 0;
+    let mut minute: i32 = 0;
+    let mut second: i32 = 0;
+    let mut nanosecond: i64 = 0;
+
+    let trimmed = s.trim();
+    let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('+') {
+        (1i32, stripped.trim())
+    } else if let Some(stripped) = trimmed.strip_prefix('-') {
+        (-1, stripped.trim())
+    } else {
+        (1, trimmed)
+    };
+
+    // Try "D HH:MI:SS.FF" format first
+    let rest_for_parse = if rest.contains(' ') {
+        // "D HH:MI:SS.FF" — extract day
+        if let Some((d_part, time_part)) = rest.split_once(' ') {
+            if let Ok(d) = d_part.trim().parse::<i32>() {
+                day = d;
+            }
+            time_part.trim()
+        } else {
+            rest
+        }
+    } else {
+        rest
+    };
+
+    // Parse HH:MI:SS.FF
+    if let Some((time, frac_str)) = rest_for_parse.split_once('.') {
+        let parts: Vec<&str> = time.split(':').collect();
+        if parts.len() >= 3 {
+            if let Ok(h) = parts[0].parse::<i32>() { hour = h; }
+            if let Ok(m) = parts[1].parse::<i32>() { minute = m; }
+            if let Ok(s_val) = parts[2].parse::<i32>() { second = s_val; }
+        } else if parts.len() == 2 {
+            if let Ok(h) = parts[0].parse::<i32>() { hour = h; }
+            if let Ok(m) = parts[1].parse::<i32>() { minute = m; }
+        }
+        // Nanoseconds from fractional seconds (scale the fractional digits)
+        if let Ok(f) = frac_str.parse::<f64>() {
+            nanosecond = (f * 1_000_000_000.0) as i64;
+        }
+    } else {
+        let parts: Vec<&str> = rest_for_parse.split(':').collect();
+        if parts.len() >= 3 {
+            if let Ok(h) = parts[0].parse::<i32>() { hour = h; }
+            if let Ok(m) = parts[1].parse::<i32>() { minute = m; }
+            if let Ok(s_val) = parts[2].parse::<i32>() { second = s_val; }
+        } else if parts.len() == 2 {
+            if let Ok(h) = parts[0].parse::<i32>() { hour = h; }
+            if let Ok(m) = parts[1].parse::<i32>() { minute = m; }
+        }
+    }
+
+    let mut buf = Vec::with_capacity(24);
+    buf.extend_from_slice(&(day * sign).to_le_bytes());
+    buf.extend_from_slice(&(hour * sign).to_le_bytes());
+    buf.extend_from_slice(&(minute * sign).to_le_bytes());
+    buf.extend_from_slice(&(second * sign).to_le_bytes());
+    buf.extend_from_slice(&(nanosecond * sign as i64).to_le_bytes());
+    buf
+}
+
+/// Parse a raw output parameter value from the EXEC_RESPONSE frame.
+///
+/// After executing a stored procedure with OUTPUT or INPUT_OUTPUT parameters,
+/// this helper decodes the raw bytes returned by the server into a `DmValue`
+/// based on the parameter's type code.
+///
+/// # Arguments
+/// * `bytes` - The raw bytes of the parameter value.
+/// * `type_code` - The DM type code (e.g., 4 for INT, 3 for VARCHAR).
+///
+/// # Returns
+/// * `Some(DmValue)` if the value could be decoded.
+/// * `None` if the type is unknown or the data is empty/invalid.
+pub fn parse_output_param_value(bytes: &[u8], type_code: i32) -> Option<DmValue> {
+    if bytes.is_empty() {
+        return Some(DmValue::Null);
+    }
+    let ty = DmValueType::from_type_code(type_code)?;
+    decode_value(ty, bytes, None)
 }
 
 /// Decode DM protocol bytes to a Rust value.
@@ -495,7 +711,7 @@ pub fn decode_value(ty: DmValueType, data: &[u8], lob_meta: Option<(i32, i16)>) 
                 None
             }
         }
-        DmValueType::FLOAT => {
+        DmValueType::FLOAT | DmValueType::REAL => {
             if data.len() >= 4 {
                 let v = f32::from_le_bytes([data[0], data[1], data[2], data[3]]);
                 Some(DmValue::Float(v))
@@ -503,10 +719,10 @@ pub fn decode_value(ty: DmValueType, data: &[u8], lob_meta: Option<(i32, i16)>) 
                 None
             }
         }
-        DmValueType::BIT => {
+        DmValueType::BIT | DmValueType::BOOLEAN => {
             Some(DmValue::Boolean(data[0] != 0))
         }
-        DmValueType::VARCHAR | DmValueType::CHAR => {
+        DmValueType::VARCHAR | DmValueType::CHAR | DmValueType::VARCHAR2 => {
             String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
         }
         DmValueType::CLOB => {
@@ -545,7 +761,7 @@ pub fn decode_value(ty: DmValueType, data: &[u8], lob_meta: Option<(i32, i16)>) 
                 String::from_utf8(data.to_vec()).ok().map(DmValue::Text)
             }
         }
-        DmValueType::BINARY | DmValueType::VARBINARY => {
+        DmValueType::BINARY | DmValueType::VARBINARY | DmValueType::RAW => {
             Some(DmValue::Bytea(data.to_vec()))
         }
         DmValueType::BLOB => {
@@ -582,14 +798,17 @@ pub fn decode_value(ty: DmValueType, data: &[u8], lob_meta: Option<(i32, i16)>) 
                 Some(DmValue::Bytea(data.to_vec()))
             }
         }
-        DmValueType::DECIMAL => {
+        DmValueType::DECIMAL | DmValueType::NUMERIC => {
             let s = String::from_utf8_lossy(data);
             rust_decimal::Decimal::from_str(&s).ok().map(DmValue::Decimal)
         }
         DmValueType::TINYINT => {
             Some(DmValue::TinyInt(data[0] as i8))
         }
-        DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP | DmValueType::INTERVAL => {
+        DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP | DmValueType::INTERVAL
+        | DmValueType::DATETIME | DmValueType::DATETIME2 | DmValueType::TIME_TZ
+        | DmValueType::DATETIME_TZ | DmValueType::DATETIME2_TZ | DmValueType::INTERVAL_YM
+        | DmValueType::INTERVAL_DT => {
             // DM stores DATE/TIME/TIMESTAMP/INTERVAL as binary:
             // DATE: 7 bytes (year:2, month:1, day:1, hour:1, min:1, sec:1)
             // TIME: 6 bytes (hour:1, min:1, sec:1, nanosec:4)
@@ -736,6 +955,109 @@ mod tests {
         let encoded = encode_value(DmValueType::BLOB, &val);
         assert_eq!(encoded, vec![0xDE, 0xAD, 0xBE, 0xEF]);
         let decoded = decode_value(DmValueType::BLOB, &encoded, None).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_new_type_codes() {
+        assert_eq!(DmValueType::NUMERIC.type_code(), 20);
+        assert_eq!(DmValueType::BOOLEAN.type_code(), 21);
+        assert_eq!(DmValueType::DATETIME.type_code(), 22);
+        assert_eq!(DmValueType::VARCHAR2.type_code(), 23);
+        assert_eq!(DmValueType::DATETIME2.type_code(), 24);
+        assert_eq!(DmValueType::TIME_TZ.type_code(), 25);
+        assert_eq!(DmValueType::DATETIME_TZ.type_code(), 26);
+        assert_eq!(DmValueType::INTERVAL_YM.type_code(), 27);
+        assert_eq!(DmValueType::INTERVAL_DT.type_code(), 28);
+        assert_eq!(DmValueType::RAW.type_code(), 29);
+        assert_eq!(DmValueType::DATETIME2_TZ.type_code(), 30);
+        assert_eq!(DmValueType::REAL.type_code(), 31);
+    }
+
+    #[test]
+    fn test_new_from_type_code() {
+        assert_eq!(DmValueType::from_type_code(20), Some(DmValueType::NUMERIC));
+        assert_eq!(DmValueType::from_type_code(21), Some(DmValueType::BOOLEAN));
+        assert_eq!(DmValueType::from_type_code(22), Some(DmValueType::DATETIME));
+        assert_eq!(DmValueType::from_type_code(23), Some(DmValueType::VARCHAR2));
+        assert_eq!(DmValueType::from_type_code(24), Some(DmValueType::DATETIME2));
+        assert_eq!(DmValueType::from_type_code(25), Some(DmValueType::TIME_TZ));
+        assert_eq!(DmValueType::from_type_code(26), Some(DmValueType::DATETIME_TZ));
+        assert_eq!(DmValueType::from_type_code(27), Some(DmValueType::INTERVAL_YM));
+        assert_eq!(DmValueType::from_type_code(28), Some(DmValueType::INTERVAL_DT));
+        assert_eq!(DmValueType::from_type_code(29), Some(DmValueType::RAW));
+        assert_eq!(DmValueType::from_type_code(30), Some(DmValueType::DATETIME2_TZ));
+        assert_eq!(DmValueType::from_type_code(31), Some(DmValueType::REAL));
+    }
+
+    #[test]
+    fn test_new_type_names() {
+        assert_eq!(DmValueType::NUMERIC.type_name(), "NUMERIC");
+        assert_eq!(DmValueType::BOOLEAN.type_name(), "BOOLEAN");
+        assert_eq!(DmValueType::DATETIME.type_name(), "DATETIME");
+        assert_eq!(DmValueType::VARCHAR2.type_name(), "VARCHAR2");
+        assert_eq!(DmValueType::DATETIME2.type_name(), "DATETIME2");
+        assert_eq!(DmValueType::TIME_TZ.type_name(), "TIME_TZ");
+        assert_eq!(DmValueType::DATETIME_TZ.type_name(), "DATETIME_TZ");
+        assert_eq!(DmValueType::INTERVAL_YM.type_name(), "INTERVAL_YM");
+        assert_eq!(DmValueType::INTERVAL_DT.type_name(), "INTERVAL_DT");
+        assert_eq!(DmValueType::RAW.type_name(), "RAW");
+        assert_eq!(DmValueType::DATETIME2_TZ.type_name(), "DATETIME2_TZ");
+        assert_eq!(DmValueType::REAL.type_name(), "REAL");
+    }
+
+    #[test]
+    fn test_encode_decode_boolean() {
+        let val = DmValue::Boolean(false);
+        let encoded = encode_value(DmValueType::BOOLEAN, &val);
+        assert_eq!(encoded, vec![0]);
+        let decoded = decode_value(DmValueType::BOOLEAN, &encoded, None).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_encode_decode_raw() {
+        let val = DmValue::Bytea(vec![0xAA, 0xBB]);
+        let encoded = encode_value(DmValueType::RAW, &val);
+        assert_eq!(encoded, vec![0xAA, 0xBB]);
+        let decoded = decode_value(DmValueType::RAW, &encoded, None).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_encode_decode_real() {
+        let val = DmValue::Float(3.14f32);
+        let encoded = encode_value(DmValueType::REAL, &val);
+        assert_eq!(encoded, 3.14f32.to_le_bytes().to_vec());
+        let decoded = decode_value(DmValueType::REAL, &encoded, None).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_encode_decode_numeric() {
+        use rust_decimal::Decimal;
+        let val = DmValue::Decimal(Decimal::from(42));
+        let encoded = encode_value(DmValueType::NUMERIC, &val);
+        assert_eq!(encoded, b"42");
+        let decoded = decode_value(DmValueType::NUMERIC, &encoded, None).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_encode_decode_varchar2() {
+        let val = DmValue::Text("test".to_string());
+        let encoded = encode_value(DmValueType::VARCHAR2, &val);
+        assert_eq!(encoded, b"test");
+        let decoded = decode_value(DmValueType::VARCHAR2, &encoded, None).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_encode_decode_datetime() {
+        let val = DmValue::Text("2024-01-01 12:00:00".to_string());
+        let encoded = encode_value(DmValueType::DATETIME, &val);
+        assert_eq!(encoded, b"2024-01-01 12:00:00");
+        let decoded = decode_value(DmValueType::DATETIME, &encoded, None).unwrap();
         assert_eq!(decoded, val);
     }
 }

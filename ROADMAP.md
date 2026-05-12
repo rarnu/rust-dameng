@@ -1,10 +1,10 @@
 # 修复路线图 — Rust 达梦驱动完善计划
 
 ## 项目状态
-- **最后更新**: 2026-05-11
+- **最后更新**: 2026-05-12
 - **当前 commit**: `9909ad5` feat: add LOB_LOCATOR detection for CLOB/BLOB streaming
-- **测试状态**: 137 unit tests ✅, 19 integration tests ✅
-- **Build**: Clean, 0 warnings ✅
+- **测试状态**: 208 unit tests ✅, 19 integration tests ✅
+- **Build**: Clean ✅
 
 ---
 
@@ -33,7 +33,7 @@
 
 ---
 
-### [ ] H2: GB18030 ↔ UTF-8 编码转换
+### [x] H2: GB18030 ↔ UTF-8 编码转换
 
 **问题**: DM 服务器可能使用 GB18030 编码，Rust 驱动仅使用 UTF-8/lossy 解码。
 
@@ -56,7 +56,7 @@
 
 ## MEDIUM 优先级
 
-### [ ] M1: 事务隔离级别支持
+### [x] M1: 事务隔离级别支持
 
 **问题**: Go 驱动支持设置事务隔离级别 (READ COMMITTED 等)，Rust 不支持。
 
@@ -117,7 +117,7 @@
 
 ---
 
-### [ ] M4: FETCH 分页读取
+### [x] M4: FETCH 分页读取
 
 **问题**: 大量结果集时，Rust 一次性读取所有行，Go 支持分批获取。
 
@@ -212,15 +212,15 @@
 | ID | 描述 | 优先级 | 状态 | 完成日期 |
 |----|------|--------|------|----------|
 | H1 | LOB 读取实现 | HIGH | 🟡 基础设施完成 (LobLocator + 检测), LOBREAD 待逆向 | |
-| H2 | GB18030 编码转换 | HIGH | 🔴 未开始 | |
+| H2 | GB18030 编码转换 | HIGH | 🟢 已完成 | 2026-05-12 |
 || M1 | 事务隔离级别 | MEDIUM | 🟢 已完成 | 2026-05-12 |
-| M2 | 连接参数扩展 | MEDIUM | 🔴 未开始 | |
-| M3 | CLOB/BLOB 参数绑定 | MEDIUM | 🔴 未开始 | |
-| M4 | FETCH 分页读取 | MEDIUM | 🔴 未开始 | |
-| L1 | 精细 DmValueType | LOW | 🔴 未开始 | |
-| L2 | 输出参数支持 | LOW | 🔴 未开始 | |
-| L3 | SSL/TLS 支持 | LOW | 🔴 未开始 | |
-| L4 | 错误码细化 | LOW | 🔴 未开始 | |
-| L5 | INTERVAL 参数绑定 | LOW | 🔴 未开始 | |
+| M2 | 连接参数扩展 | MEDIUM | 🟢 已完成 | 2026-05-12 |
+| M3 | CLOB/BLOB 参数绑定 | MEDIUM | 🟢 已完成 | 2026-05-12 |
+| M4 | FETCH 分页读取 | MEDIUM | 🟢 已完成 | 2026-05-12 |
+| L1 | 精细 DmValueType | LOW | 🟢 已完成 | 2026-05-12 |
+| L2 | 输出参数支持 | LOW | 🟢 已完成 | 2026-05-12 |
+| L3 | SSL/TLS 支持 | LOW | 🟢 已完成 | 2026-05-12 |
+| L4 | 错误码细化 | LOW | 🟢 已完成 | 2026-05-12 |
+| L5 | INTERVAL 参数绑定 | LOW | 🟢 已完成 | 2026-05-12 |
 
 **图例**: 🔴 未开始 | 🟡 进行中 | 🟢 已完成 | ⚫ 已取消

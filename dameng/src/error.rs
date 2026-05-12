@@ -12,6 +12,23 @@ pub enum Error {
     DecodeError(String),
     QueryFailed(String),
     NotConnected,
+    ConfigError(String),
+    /// Invalid transaction isolation level was specified.
+    InvalidIsolation(String),
+    /// LOB locator has been freed and can no longer be used.
+    LobFreed(String),
+    /// Date/time format parsing failed.
+    InvalidDateFormat(String),
+    /// Server returned a busy or overloaded state.
+    ServerBusy,
+    /// LOB read operation failed.
+    LobReadFailed(String),
+    /// LOB write operation failed.
+    LobWriteFailed(String),
+    /// Operation timed out.
+    Timeout(String),
+    /// Schema/database name resolution error.
+    SchemaError(String),
 }
 
 impl fmt::Display for Error {
@@ -25,6 +42,15 @@ impl fmt::Display for Error {
             Error::DecodeError(s) => write!(f, "decode error: {s}"),
             Error::QueryFailed(s) => write!(f, "query failed: {s}"),
             Error::NotConnected => write!(f, "not connected"),
+            Error::ConfigError(s) => write!(f, "config error: {s}"),
+            Error::InvalidIsolation(s) => write!(f, "invalid isolation level: {s}"),
+            Error::LobFreed(s) => write!(f, "LOB freed: {s}"),
+            Error::InvalidDateFormat(s) => write!(f, "invalid date format: {s}"),
+            Error::ServerBusy => write!(f, "server busy"),
+            Error::LobReadFailed(s) => write!(f, "LOB read failed: {s}"),
+            Error::LobWriteFailed(s) => write!(f, "LOB write failed: {s}"),
+            Error::Timeout(s) => write!(f, "timeout: {s}"),
+            Error::SchemaError(s) => write!(f, "schema error: {s}"),
         }
     }
 }

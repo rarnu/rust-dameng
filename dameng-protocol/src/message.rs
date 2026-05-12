@@ -15,6 +15,7 @@ pub mod close;
 pub mod response;
 pub mod isolation;
 pub mod lob;
+pub mod lob_bind;
 
 pub use startup::*;
 pub use login::*;
@@ -27,6 +28,7 @@ pub use close::*;
 pub use response::*;
 pub use isolation::*;
 pub use lob::*;
+pub use lob_bind::*;
 
 // Re-export msg_type constants at top level for convenience
 pub use self::msg_type::*;
@@ -106,6 +108,18 @@ pub mod dm_type {
     pub const CHAR: i32 = 16;
     pub const BINARY: i32 = 17;
     pub const VARBINARY: i32 = 18;
+    pub const NUMERIC: i32 = 20;
+    pub const BOOLEAN: i32 = 21;
+    pub const DATETIME: i32 = 22;
+    pub const VARCHAR2: i32 = 23;
+    pub const DATETIME2: i32 = 24;
+    pub const TIME_TZ: i32 = 25;
+    pub const DATETIME_TZ: i32 = 26;
+    pub const INTERVAL_YM: i32 = 27;
+    pub const INTERVAL_DT: i32 = 28;
+    pub const RAW: i32 = 29;
+    pub const DATETIME2_TZ: i32 = 30;
+    pub const REAL: i32 = 31;
 }
 
 /// DM encoding values.
