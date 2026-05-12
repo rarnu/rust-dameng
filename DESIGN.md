@@ -213,6 +213,30 @@ Then for each column:
 15   INTERVAL
 ```
 
+### 1.13 SET_ISOLATION Message (type 52)
+
+**Verified against Go driver** `dm_go/m.go:g2dbIsoLevel()` and `dm_go/zq.go:dm_build_828`.
+
+Unlike most messages that send isolation_level in the payload, SET_ISOLATION writes it directly into the 64-byte frame header at offset 20, with body_len=0.
+
+**Protocol values** (NOT standard SQL 1/2/4/6):
+- 0: Read Uncommitted
+- 1: Read Committed (default)
+- 2: Repeatable Read
+- 3: Serializable
+
+**Frame encoding**:
+- offset 0: handle (u32 LE)
+- offset 4: msg_type = 52 (SET_ISOLATION)
+- offset 6: body_len = 0 (i32 LE)
+- offset 10: response_code = 0 (i32 LE)
+- offset 18: compress_flag = 0 (u8)
+- offset 19: checksum (XOR of bytes 0-18)
+- offset 20: isolation_level (i32 LE) ← key field
+- offset 24-63: zeros
+
+**Server response**: ACK(187) with empty payload, response_code=0 on success.
+
 ## Phase 2: dameng-types
 
 Rust types mapping:

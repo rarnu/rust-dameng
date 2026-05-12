@@ -34,7 +34,8 @@ Build a complete async Rust driver for Dameng (达梦) database implementing sql
 
 The DM wire protocol uses TCP with a 64-byte frame header + variable payload:
 - Header: version(4B) + msg_type(2B) + handle(6B) + reserved(10B) + payload_len(2B) + reserved(16B) + checksum(4B) + reserved(20B)
-- Key message types: STARTUP(200/228), LOGIN(1/163), READY(3/187), PREPARE/EXEC(5/0), BIND(13/187), COMMIT(8/187), CLOSE(20/187), FETCH(21/0)
+- Key message types: STARTUP(200/228), LOGIN(1/163), READY(3/187), PREPARE/EXEC(5/0), BIND(13/187), COMMIT(8/187), CLOSE(20/187), FETCH(21/0), SET_ISOLATION(52/187)
+- SET_ISOLATION: isolation_level(i32 LE) written at frame header offset 20, body_len=0. Protocol values: 0=ReadUncommitted, 1=ReadCommitted, 2=RepeatableRead, 3=Serializable
 - Full protocol details in DESIGN.md
 
 ## Workflow
