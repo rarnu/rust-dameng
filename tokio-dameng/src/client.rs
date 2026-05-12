@@ -772,14 +772,22 @@ impl Client {
             return Ok(vec![]);
         }
 
+        // Apply new_blob_id from server if provided (matching Go driver)
+        let mut cur_locator = locator.clone();
+        if let Some(new_id) = getlen_resp.new_blob_id {
+            // Update blob_id in the raw NBLOB_HEAD (offset 1, 8 bytes)
+            if cur_locator.raw.len() >= 9 {
+                cur_locator.raw[1..9].copy_from_slice(&new_id.to_le_bytes());
+            }
+        }
+        cur_locator.init_cursor();
+
         // Step 2: Read LOB data in chunks via LOBREAD (msg_type=32)
         // Max chunk: 16384 bytes for BLOB, 8192 chars for CLOB
         let max_chunk: usize = if locator.is_clob { 8192 } else { 16384 };
 
         let mut result = Vec::with_capacity(total_len);
         let mut position: i32 = 0;
-        let mut cur_locator = locator.clone();
-        cur_locator.init_cursor();
 
         while (position as usize) < total_len {
             let remaining = total_len - position as usize;

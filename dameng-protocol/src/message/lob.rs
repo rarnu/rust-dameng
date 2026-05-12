@@ -356,25 +356,35 @@ impl LobGetLenMessage {
 pub struct LobGetLenResponse {
     /// Length in bytes (BLOB) or characters (CLOB).
     pub length: i64,
+    /// New blob ID from server (if server updated it).
+    /// Used to refresh the locator for subsequent reads.
+    pub new_blob_id: Option<i64>,
 }
 
 impl LobGetLenResponse {
     /// Parse LOBGETLEN response from raw payload.
     ///
-    /// Response format:
-    /// - length (i32 LE)
-    /// - newBlobId (i64 LE) — if response has 8+ remaining bytes
+    /// Response format (matching Go driver dm_build_714.dm_build_425):
+    /// - length (i32 LE) — LOB length
+    /// - newBlobId (i64 LE) — updated blob ID from server (DDWORD)
     pub fn from_bytes(data: &[u8]) -> crate::error::Result<Self> {
         if data.len() < 4 {
             return Err(crate::error::Error::Incomplete);
         }
-        let length = i64::from(i32::from_le_bytes([
-            data[0],
-            data[1],
-            data[2],
-            data[3],
-        ]));
-        Ok(Self { length })
+        let length = i64::from(i32::from_le_bytes([data[0], data[1], data[2], data[3]]));
+
+        // Parse newBlobId (DDWORD = i64 LE) if available
+        let new_blob_id = if data.len() >= 12 {
+            let blob_id = i64::from_le_bytes([
+                data[4], data[5], data[6], data[7],
+                data[8], data[9], data[10], data[11],
+            ]);
+            Some(blob_id)
+        } else {
+            None
+        };
+
+        Ok(Self { length, new_blob_id })
     }
 }
 
