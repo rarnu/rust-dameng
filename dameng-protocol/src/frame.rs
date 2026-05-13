@@ -38,6 +38,9 @@ pub struct Frame {
     pub affected_rows: i32,
     /// Compression flag (0=none, 1=snappy, 2=zlib).
     pub compress_flag: u8,
+    /// Update count for DML operations, stored in the reserved area
+    /// at header offset 24 (int64 LE). Always 0 for non-DML.
+    pub update_count: u64,
 }
 
 impl Frame {
@@ -50,6 +53,7 @@ impl Frame {
             response_code: 0,
             affected_rows: 0,
             compress_flag: 0,
+            update_count: 0,
         }
     }
 
@@ -83,6 +87,17 @@ impl Frame {
             return Err(Error::ChecksumMismatch);
         }
 
+        // Parse update_count from the reserved area at header offset 24 (int64 LE).
+        // Need to read from the raw buffer before advancing. buf currently has
+        // cursor at byte 20 (after consuming 20 bytes).
+        // Bytes [4..12] of the remaining 44-byte reserved area = absolute offset 24.
+        let update_count = if buf.remaining() >= 12 {
+            let raw = &buf.chunk()[4..12]; // offset 24-31 in absolute header
+            u64::from_le_bytes([raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7]])
+        } else {
+            0
+        };
+
         // Skip remaining 44 bytes of reserved
         buf.advance(44);
 
@@ -93,6 +108,7 @@ impl Frame {
             response_code,
             affected_rows,
             compress_flag,
+            update_count,
         })
     }
 

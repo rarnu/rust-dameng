@@ -1,4 +1,4 @@
-//! Real parameter binding examples using execute_with_params.
+//! Real parameter binding examples using execute_with_params / query_with_params.
 //!
 //! Demonstrates INT, VARCHAR, TIMESTAMP parameter binding with
 //! INSERT, UPDATE, SELECT, DELETE via the actual bind parameter API.
@@ -8,43 +8,7 @@
 
 use std::env;
 
-use dameng::{BindParam, Client, ParameterDirection};
-use dameng_types::{encode_value, DmValue, DmValueType};
-
-fn make_int_param(value: i32) -> BindParam {
-    BindParam {
-        type_name: "INT".to_string(),
-        type_code: 4,
-        precision: 0,
-        scale: 0,
-        direction: ParameterDirection::Input,
-        value: Some(encode_value(DmValueType::INT, &DmValue::Int(value))),
-    }
-}
-
-fn make_varchar_param(value: &str) -> BindParam {
-    let bytes = value.as_bytes();
-    BindParam {
-        type_name: "VARCHAR".to_string(),
-        type_code: 3,
-        precision: bytes.len() as i32,
-        scale: 0,
-        direction: ParameterDirection::Input,
-        value: Some(encode_value(DmValueType::VARCHAR, &DmValue::Text(value.to_string()))),
-    }
-}
-
-fn make_timestamp_param(value: &str) -> BindParam {
-    let bytes = value.as_bytes();
-    BindParam {
-        type_name: "TIMESTAMP".to_string(),
-        type_code: 12,
-        precision: bytes.len() as i32,
-        scale: 0,
-        direction: ParameterDirection::Input,
-        value: Some(encode_value(DmValueType::TIMESTAMP, &DmValue::Text(value.to_string()))),
-    }
-}
+use dameng::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = env::var("DM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -66,21 +30,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === INSERT with INT + VARCHAR params ===
     println!("=== INSERT with INT + VARCHAR params ===");
-    let sql = "INSERT INTO SAMPLE (ID, NAME) VALUES (?, ?)";
-    let params = vec![make_int_param(10), make_varchar_param("ParamAlice")];
-    client.execute_with_params(0, sql, &params)?;
+    let id1: i32 = 10;
+    let name1 = String::from("ParamAlice");
+    client.execute_with_params(
+        "INSERT INTO SAMPLE (ID, NAME) VALUES (?, ?)",
+        &[&id1, &name1],
+    )?;
     println!("  Inserted: ID=10, NAME='ParamAlice'");
 
-    let sql = "INSERT INTO SAMPLE (ID, NAME) VALUES (?, ?)";
-    let params = vec![make_int_param(11), make_varchar_param("ParamBob")];
-    client.execute_with_params(0, sql, &params)?;
+    let id2: i32 = 11;
+    let name2 = String::from("ParamBob");
+    client.execute_with_params(
+        "INSERT INTO SAMPLE (ID, NAME) VALUES (?, ?)",
+        &[&id2, &name2],
+    )?;
     println!("  Inserted: ID=11, NAME='ParamBob'\n");
 
     // === SELECT with INT param ===
     println!("=== SELECT with INT param (WHERE ID = ?) ===");
-    let sql = "SELECT ID, NAME FROM SAMPLE WHERE ID = ?";
-    let params = vec![make_int_param(10)];
-    let rs = client.execute_with_params(0, sql, &params)?;
+    let find_id: i32 = 10;
+    let rs = client.query_with_params("SELECT ID, NAME FROM SAMPLE WHERE ID = ?", &[&find_id])?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(1).ok().unwrap_or_default();
@@ -89,9 +58,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === SELECT with VARCHAR param ===
     println!("\n=== SELECT with VARCHAR param (WHERE NAME = ?) ===");
-    let sql = "SELECT ID, NAME FROM SAMPLE WHERE NAME = ?";
-    let params = vec![make_varchar_param("ParamBob")];
-    let rs = client.execute_with_params(0, sql, &params)?;
+    let find_name = String::from("ParamBob");
+    let rs =
+        client.query_with_params("SELECT ID, NAME FROM SAMPLE WHERE NAME = ?", &[&find_name])?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(1).ok().unwrap_or_default();
@@ -100,15 +69,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === UPDATE with multiple params ===
     println!("\n=== UPDATE with INT + VARCHAR params ===");
-    let sql = "UPDATE SAMPLE SET NAME = ? WHERE ID = ?";
-    let params = vec![make_varchar_param("UpdatedAlice"), make_int_param(10)];
-    client.execute_with_params(0, sql, &params)?;
+    let updated_name = String::from("UpdatedAlice");
+    let update_id: i32 = 10;
+    client.execute_with_params(
+        "UPDATE SAMPLE SET NAME = ? WHERE ID = ?",
+        &[&updated_name, &update_id],
+    )?;
     println!("  Updated: NAME='UpdatedAlice' WHERE ID=10");
 
     // Verify update
-    let sql = "SELECT ID, NAME FROM SAMPLE WHERE ID = ?";
-    let params = vec![make_int_param(10)];
-    let rs = client.execute_with_params(0, sql, &params)?;
+    let verify_id: i32 = 10;
+    let rs =
+        client.query_with_params("SELECT ID, NAME FROM SAMPLE WHERE ID = ?", &[&verify_id])?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(1).ok().unwrap_or_default();
@@ -117,32 +89,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === INSERT sample_detail with VARCHAR params ===
     println!("\n=== INSERT sample_detail with VARCHAR params ===");
-    let sql = "INSERT INTO SAMPLE_DETAIL (ID, ADDRESS, PHONE) VALUES (?, ?, ?)";
-    let params = vec![
-        make_int_param(10),
-        make_varchar_param("Param Address 123"),
-        make_varchar_param("13812345678"),
-    ];
-    client.execute_with_params(0, sql, &params)?;
+    let detail_id: i32 = 10;
+    let address = String::from("Param Address 123");
+    let phone = String::from("13812345678");
+    client.execute_with_params(
+        "INSERT INTO SAMPLE_DETAIL (ID, ADDRESS, PHONE) VALUES (?, ?, ?)",
+        &[&detail_id, &address, &phone],
+    )?;
     println!("  Inserted: ID=10, ADDRESS='Param Address 123', PHONE='13812345678'");
 
     // === INSERT sample_item with TIMESTAMP param ===
-    println!("\n=== INSERT sample_item with INT + VARCHAR + TIMESTAMP params ===");
-    let sql = "INSERT INTO SAMPLE_ITEM (SAMPLE_ID, ITEM_ID, ITEM_NAME, BUY_TIME) VALUES (?, ?, ?, ?)";
-    let params = vec![
-        make_int_param(10),
-        make_int_param(1001),
-        make_varchar_param("Keyboard"),
-        make_timestamp_param("2024-06-15 10:30:00"),
-    ];
-    client.execute_with_params(0, sql, &params)?;
-    println!("  Inserted: SAMPLE_ID=10, ITEM_ID=1001, ITEM_NAME='Keyboard', BUY_TIME='2024-06-15 10:30:00'");
+    println!(
+        "\n=== INSERT sample_item with INT + VARCHAR + TIMESTAMP params ==="
+    );
+    let sample_id: i32 = 10;
+    let item_id: i32 = 1001;
+    let item_name = String::from("Keyboard");
+    let buy_time = String::from("2024-06-15 10:30:00");
+    client.execute_with_params(
+        "INSERT INTO SAMPLE_ITEM (SAMPLE_ID, ITEM_ID, ITEM_NAME, BUY_TIME) VALUES (?, ?, ?, ?)",
+        &[&sample_id, &item_id, &item_name, &buy_time],
+    )?;
+    println!(
+        "  Inserted: SAMPLE_ID=10, ITEM_ID=1001, ITEM_NAME='Keyboard', BUY_TIME='2024-06-15 10:30:00'"
+    );
 
     // === SELECT with TIMESTAMP param (WHERE buy_time >= ?) ===
     println!("\n=== SELECT with TIMESTAMP param (WHERE BUY_TIME >= ?) ===");
-    let sql = "SELECT SAMPLE_ID, ITEM_ID, ITEM_NAME, BUY_TIME FROM SAMPLE_ITEM WHERE BUY_TIME >= ?";
-    let params = vec![make_timestamp_param("2024-06-01 00:00:00")];
-    let rs = client.execute_with_params(0, sql, &params)?;
+    let time_filter = String::from("2024-06-01 00:00:00");
+    let rs = client.query_with_params(
+        "SELECT SAMPLE_ID, ITEM_ID, ITEM_NAME, BUY_TIME FROM SAMPLE_ITEM WHERE BUY_TIME >= ?",
+        &[&time_filter],
+    )?;
     println!(
         "  Columns: {:?}",
         rs.columns
@@ -155,14 +133,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let iid = row.get_i32(1).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(2).ok().unwrap_or_default();
         let time = row.get_timestamp(3).ok().unwrap_or_default();
-        println!("  SAMPLE_ID={}, ITEM_ID={}, ITEM_NAME={}, BUY_TIME={}", sid, iid, name, time);
+        println!(
+            "  SAMPLE_ID={}, ITEM_ID={}, ITEM_NAME={}, BUY_TIME={}",
+            sid, iid, name, time
+        );
     }
 
     // === DELETE with param ===
     println!("\n=== DELETE with INT param ===");
-    let sql = "DELETE FROM SAMPLE_ITEM WHERE SAMPLE_ID = ?";
-    let params = vec![make_int_param(10)];
-    client.execute_with_params(0, sql, &params)?;
+    let del_id: i32 = 10;
+    client.execute_with_params(
+        "DELETE FROM SAMPLE_ITEM WHERE SAMPLE_ID = ?",
+        &[&del_id],
+    )?;
     println!("  Deleted: SAMPLE_ID=10");
 
     // Verify deletion
@@ -174,11 +157,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // === LEFT JOIN with param ===
     println!("\n=== LEFT JOIN with param ===");
+    let join_id: i32 = 10;
     let sql = "SELECT S.ID, S.NAME, SD.ADDRESS, SD.PHONE \
                FROM SAMPLE S LEFT JOIN SAMPLE_DETAIL SD ON S.ID = SD.ID \
                WHERE S.ID = ?";
-    let params = vec![make_int_param(10)];
-    let rs = client.execute_with_params(0, sql, &params)?;
+    let rs = client.query_with_params(sql, &[&join_id])?;
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
         let name = row.get_str(1).ok().unwrap_or_default();
@@ -192,7 +175,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             row.get_str(3).ok().unwrap_or_default()
         };
-        println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
+        println!(
+            "  ID={}, NAME={}, ADDRESS={}, PHONE={}",
+            id, name, addr, phone
+        );
     }
 
     // Cleanup
@@ -200,7 +186,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = client.execute("DELETE FROM sample_item WHERE sample_id IN (10, 11)");
     let _ = client.execute("DELETE FROM sample_detail WHERE id IN (10, 11)");
     let _ = client.execute("DELETE FROM sample WHERE id IN (10, 11)");
-    client.commit()?;
 
     println!("\nDone!");
     Ok(())

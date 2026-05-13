@@ -157,6 +157,22 @@ impl FetchResponse {
 
         // The row data follows the same inline format as EXEC_RESPONSE.
         // Parse it using the ExecResponse parser.
+        // Guard against parsing garbage: if row_data is all zeros or too short,
+        // the server returned metadata only (no inline data).
+        let has_real_data = row_data.len() > 16
+            && !row_data.iter().all(|&b| b == 0)
+            && row_data[0] != 0;
+
+        if !has_real_data {
+            // Server returned a cursor/total count but no inline row data.
+            // This happens when the cursor_id is invalid or the result is empty.
+            return Ok(FetchResponse {
+                total_row_count,
+                columns: vec![],
+                rows: vec![],
+            });
+        }
+
         match ExecResponse::from_bytes(row_data, server_encoding) {
             Ok(resp) => Ok(FetchResponse {
                 total_row_count,

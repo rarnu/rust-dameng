@@ -259,6 +259,8 @@ impl Client {
         let login_resp = self.read_login_response()?;
         // Save server encoding from LOGIN_RESPONSE (1=UTF-8, 2=GB18030)
         self.server_encoding = ServerEncoding::from_protocol_value(login_resp.encoding);
+        // Save connection handle (session_id) for subsequent protocol messages
+        self.handle = login_resp.session_id;
         if !login_resp.username.is_empty() {
             self.state = State::Ready;
             Ok(())
@@ -382,7 +384,7 @@ impl Client {
         }
         let alloc = StatementAllocateMessage::new();
         let payload = alloc.encode_payload();
-        self.write_all(&build_message(STATEMENT_PREPARE, 0, &payload))?;
+        self.write_all(&build_message(STATEMENT_PREPARE, self.handle, &payload))?;
         let (frame, resp_payload) = self.read_message()?;
         if frame.response_code < 0 {
             return Err(Error::ConnectionFailed(format!(
@@ -437,9 +439,6 @@ impl Client {
 
     /// Execute a SQL statement with dynamic parameters and return the number of affected rows.
     ///
-    /// # SQLx-style usage
-    /// Execute a SQL statement with dynamic parameters and return the number of affected rows.
-    ///
     /// For DML: INSERT, UPDATE, DELETE, CREATE, DROP, etc.
     /// Auto-commits if `auto_commit` is enabled.
     ///
@@ -467,12 +466,9 @@ impl Client {
             return Err(Error::NotConnected);
         }
 
-        let bind_params: Vec<BindParam> = params
-            .iter()
-            .map(|p| to_bind_param(*p))
-            .collect();
-
-        self.do_execute_dml_with_params(&bind_params, sql)
+        let bind_params: Vec<BindParam> = params.iter().map(|p| to_bind_param(*p)).collect();
+        let rs = self.do_prepare_execute(&bind_params, sql, false)?;
+        Ok(rs.total_row_count)
     }
 
     /// Execute a SQL SELECT query with dynamic parameters and return the result set.
@@ -498,30 +494,60 @@ impl Client {
             return Err(Error::NotConnected);
         }
 
-        let bind_params: Vec<BindParam> = params
-            .iter()
-            .map(|p| to_bind_param(*p))
-            .collect();
-
-        self.do_query_with_params(&bind_params, sql)
+        let bind_params: Vec<BindParam> = params.iter().map(|p| to_bind_param(*p)).collect();
+        self.do_prepare_execute(&bind_params, sql, true)
     }
 
-    /// Execute DML (non-SELECT) with bound params — always commits if auto_commit.
-    fn do_execute_dml_with_params(&mut self, params: &[BindParam], sql: &str) -> Result<u64> {
+    /// Internal: execute SQL with pre-built BindParams (shared by sqlx/query builder modules).
+    pub(crate) fn do_execute_with_bind_params(
+        &mut self,
+        sql: &str,
+        has_result_set: bool,
+        params: &[BindParam],
+    ) -> Result<ResultSet> {
+        self.do_prepare_execute(params, sql, has_result_set)
+    }
+
+    /// Core execution: READY → EXEC(5) prepare → BIND_EXEC2 → read result.
+    ///
+    /// All SQL execution flows through this single method. The `params` slice
+    /// may be empty (no parameters) or contain bound parameters. The `has_result_set`
+    /// flag controls whether the server returns rows (SELECT) or affected count (DML).
+    fn do_prepare_execute(
+        &mut self,
+        params: &[BindParam],
+        sql: &str,
+        has_result_set: bool,
+    ) -> Result<ResultSet> {
+        // No params: use OPE(91) fast path — single message, prepare + execute.
         if params.is_empty() {
-            // No params: use execute() path directly
-            return self.execute(sql);
+            let ready_frame = Frame::new(READY, 0, 0);
+            self.write_all(&ready_frame.encode())?;
+            self.read_message()?;
+
+            let exec = ExecMessage::new(sql, 0);
+            self.write_all(&build_message(
+                OPTIMIZED_PREPARE_EXEC,
+                0,
+                &exec.encode_payload(),
+            ))?;
+
+            let rs = self.read_exec_response(false)?;
+
+            if self.auto_commit && !has_result_set {
+                self.do_commit()?;
+            }
+            return Ok(rs);
         }
 
-        let stmt_id = self.handle;
-
+        // With params: EXEC(5) prepare → BIND_EXEC2 → read result
         // READY
         self.write_all(&Frame::new(READY, 0, 0).encode())?;
         self.read_message()?;
 
-        // EXEC to PREPARE
+        // EXEC(5) to PREPARE the statement
         let exec = ExecMessage::new(sql, 0);
-        self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
+        self.write_all(&build_message(EXEC, self.handle, &exec.encode_payload()))?;
         let (exec_frame, exec_payload) = self.read_message()?;
         if exec_frame.response_code < 0 {
             let msg = String::from_utf8_lossy(&exec_payload);
@@ -531,59 +557,32 @@ impl Client {
             )));
         }
 
-        // LOB streaming for off-row params
+        // stmt_id: EXEC(5) reuses the connection handle for statement context
+        let stmt_id = self.handle;
+
+        // LOB streaming for off-row params (BLOB/CLOB > 2048 bytes)
         self.stream_lob_params(stmt_id, params)?;
 
-        // BIND_EXEC2 with has_result_set=false — auto_commit in message=false
-        // We handle commit explicitly via do_commit() below
+        // BIND_EXEC2: bind parameters and execute
         let bind_params = self.clear_off_row_placeholders(params);
-        let bind_exec2 = BindExec2Message::new(false, false, bind_params);
+        let bind_exec2 = BindExec2Message::new(false, has_result_set, bind_params);
         let bind_payload = bind_exec2.encode_payload();
         self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
 
-        let rs = self.read_exec_response()?;
+        // Read result — pass has_result_set so DML doesn't incorrectly enter FETCH path
+        let mut rs = self.read_exec_response(has_result_set)?;
 
-        // COMMIT if auto_commit
-        if self.auto_commit {
+        // For SELECT with params, BIND_EXEC2 may return col_count=0 and total_row_count > 0.
+        // In this case the server expects us to use FETCH to retrieve the data.
+        if has_result_set && rs.columns.is_empty() && rs.total_row_count > 0 {
+            rs = self.fetch_from_bind_exec(stmt_id, rs.total_row_count)?;
+        }
+
+        // Auto-commit for DML (non-SELECT) when auto_commit is on
+        if self.auto_commit && !has_result_set {
             self.do_commit()?;
         }
 
-        Ok(rs.total_row_count)
-    }
-
-    /// Execute SELECT with bound params — does NOT commit.
-    fn do_query_with_params(&mut self, params: &[BindParam], sql: &str) -> Result<ResultSet> {
-        if params.is_empty() {
-            return self.query(sql);
-        }
-
-        let stmt_id = self.handle;
-
-        // READY
-        self.write_all(&Frame::new(READY, 0, 0).encode())?;
-        self.read_message()?;
-
-        // EXEC to PREPARE
-        let exec = ExecMessage::new(sql, 0);
-        self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
-        let (exec_frame, exec_payload) = self.read_message()?;
-        if exec_frame.response_code < 0 {
-            let msg = String::from_utf8_lossy(&exec_payload);
-            return Err(Error::QueryFailed(format!(
-                "prepare failed: code={} type={} payload={}",
-                exec_frame.response_code, exec_frame.msg_type, msg
-            )));
-        }
-
-        // LOB streaming for off-row params
-        self.stream_lob_params(stmt_id, params)?;
-
-        // BIND_EXEC2 with has_result_set=true
-        let bind_params = self.clear_off_row_placeholders(params);
-        let bind_exec2 = BindExec2Message::new(self.auto_commit, true, bind_params);
-        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_exec2.encode_payload()))?;
-
-        let rs = self.read_exec_response()?;
         Ok(rs)
     }
 
@@ -647,54 +646,50 @@ impl Client {
             .collect()
     }
 
-    /// Internal: execute SQL with pre-built BindParams (shared by sqlx/query builder modules).
-    pub(crate) fn do_execute_with_bind_params(
-        &mut self,
-        sql: &str,
-        has_result_set: bool,
-        params: &[BindParam],
-    ) -> Result<ResultSet> {
-        if params.is_empty() {
-            if has_result_set {
-                return self.query(sql);
-            } else {
-                self.execute(sql)?;
-                return Ok(ResultSet::new());
+    /// Fetch all rows from a BIND_EXEC2 result using FETCH protocol.
+    ///
+    /// When BIND_EXEC2 returns col_count=0 but total_row_count > 0,
+    /// the data must be retrieved via FETCH messages.
+    fn fetch_from_bind_exec(&mut self, stmt_id: u32, total_rows: u64) -> Result<ResultSet> {
+        let mut all_columns = Vec::new();
+        let mut all_rows = Vec::new();
+
+        let mut start_row: i64 = 0;
+        let prefetch = 65536i32;
+
+        loop {
+            let fetch = FetchMessage::new(start_row, 0, prefetch);
+            let fetch_payload = fetch.encode_payload();
+            self.write_all(&build_message(FETCH, stmt_id, &fetch_payload))?;
+
+            let (frame, payload) = self.read_message()?;
+            if frame.response_code < 0 {
+                let msg = String::from_utf8_lossy(&payload);
+                return Err(Error::QueryFailed(format!(
+                    "fetch failed: code={} type={} payload={}",
+                    frame.response_code, frame.msg_type, msg
+                )));
+            }
+
+            let fetch_resp =
+                FetchResponse::from_bytes(&payload, self.server_encoding).map_err(|e| Error::Protocol(e))?;
+
+            // Collect columns from first fetch response
+            if all_columns.is_empty() && !fetch_resp.columns.is_empty() {
+                all_columns = fetch_resp.columns;
+            }
+
+            let fetched_rows = fetch_resp.rows;
+            let fetched_count = fetched_rows.len();
+            all_rows.extend(fetched_rows);
+            start_row += fetched_count as i64;
+
+            if start_row >= fetch_resp.total_row_count as i64 || fetched_count == 0 {
+                break;
             }
         }
 
-        let stmt_id = self.handle;
-
-        // READY
-        self.write_all(&Frame::new(READY, 0, 0).encode())?;
-        self.read_message()?;
-
-        // EXEC to PREPARE
-        let exec = ExecMessage::new(sql, 0);
-        self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
-        let (exec_frame, exec_payload) = self.read_message()?;
-        if exec_frame.response_code < 0 {
-            let msg = String::from_utf8_lossy(&exec_payload);
-            return Err(Error::QueryFailed(format!(
-                "prepare failed: code={} type={} payload={}",
-                exec_frame.response_code, exec_frame.msg_type, msg
-            )));
-        }
-
-        // LOB streaming
-        self.stream_lob_params(stmt_id, params)?;
-
-        // BIND_EXEC2
-        let bind_params = self.clear_off_row_placeholders(params);
-        let bind_exec2 = BindExec2Message::new(self.auto_commit, has_result_set, bind_params);
-        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_exec2.encode_payload()))?;
-
-        // COMMIT if auto_commit and non-SELECT
-        if self.auto_commit && !has_result_set {
-            self.do_commit()?;
-        }
-
-        self.read_exec_response()
+        Ok(ResultSet::with_data(all_columns, all_rows, 0, total_rows))
     }
 
     /// Set transaction isolation level.
@@ -732,35 +727,8 @@ impl Client {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
-
-        let ready_frame = Frame::new(READY, 0, 0);
-        self.write_all(&ready_frame.encode())?;
-        self.read_message()?; // READY ack
-
-        let exec = ExecMessage::new(sql, 0);
-        let exec_payload = exec.encode_payload();
-        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
-
-        // OPE(91) for DML returns empty ACK. The actual result is queued
-        // and sent when we send the next READY (via COMMIT below).
-        let (frame, _payload) = self.read_message()?;
-        if frame.response_code < 0 {
-            return Err(Error::QueryFailed(format!(
-                "response_code={}", frame.response_code
-            )));
-        }
-
-        // DM server doesn't auto-commit by default. When auto_commit is true,
-        // send a COMMIT after each statement to match the expected behavior.
-        // The COMMIT's READY triggers the queued EXEC_RESPONSE with affected rows.
-        if self.auto_commit {
-            // do_commit sends READY + COMMIT and reads the COMMIT response,
-            // which also flushes the queued EXEC_RESPONSE.
-            let affected = self.do_commit_with_affected()?;
-            Ok(affected)
-        } else {
-            Ok(0)
-        }
+        let rs = self.do_prepare_execute(&[], sql, false)?;
+        Ok(rs.total_row_count)
     }
 
     /// Internal commit - sends the COMMIT protocol message.
@@ -786,28 +754,70 @@ impl Client {
 
     /// Commit with affected rows - sends COMMIT and reads queued EXEC_RESPONSE first.
     /// After OPE(91) DML, DM queues the EXEC_RESPONSE and sends it when we issue the
-    /// next READY (which COMMIT does internally).
     fn do_commit_with_affected(&mut self) -> Result<u64> {
         // Send READY to trigger the server to flush queued EXEC_RESPONSE
         let ready_frame = Frame::new(READY, 0, 0);
         self.write_all(&ready_frame.encode())?;
 
-        // Read queued EXEC_RESPONSE with affected rows
-        let (frame, payload) = self.read_message()?;
-        if frame.response_code < 0 {
-            return Err(Error::QueryFailed(format!(
-                "response_code={}", frame.response_code
-            )));
+        // Read ALL messages until we find an EXEC_RESPONSE or get nothing
+        let mut affected = 0u64;
+        let mut msg_count = 0;
+
+        loop {
+            match self.try_read_message(std::time::Duration::from_millis(200)) {
+                Some(Ok((frame, payload))) => {
+                    msg_count += 1;
+                    eprintln!(
+                        "DEBUG[msg{}]: type={} len={} resp={} first32={:02?}",
+                        msg_count,
+                        frame.msg_type,
+                        payload.len(),
+                        frame.response_code,
+                        &payload[..payload.len().min(32)]
+                    );
+
+                    if frame.response_code < 0 {
+                        return Err(Error::QueryFailed(format!(
+                            "response_code={}",
+                            frame.response_code
+                        )));
+                    }
+
+                    // EXEC_RESPONSE(0) or type 160 contains the actual result data
+                    if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
+                        if payload.len() >= 16 {
+                            // offset 12 = row_count in EXEC_RESPONSE payload
+                            affected = u32::from_le_bytes([
+                                payload[12],
+                                payload[13],
+                                payload[14],
+                                payload[15],
+                            ]) as u64;
+                        }
+                        break;
+                    }
+
+                    // ACK(187) with data might also contain result
+                    if frame.msg_type == ACK && payload.len() >= 16 {
+                        // Check if this looks like EXEC_RESPONSE data
+                        affected = u32::from_le_bytes([
+                            payload[12],
+                            payload[13],
+                            payload[14],
+                            payload[15],
+                        ]) as u64;
+                    }
+                    // Empty ACK means we're done
+                    if frame.msg_type == ACK && payload.is_empty() {
+                        break;
+                    }
+                }
+                Some(Err(e)) => return Err(e),
+                None => break,
+            }
         }
 
-        // Affected rows from frame header or payload
-        let affected = if frame.affected_rows > 0 {
-            frame.affected_rows as u64
-        } else if payload.len() >= 16 {
-            u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]) as u64
-        } else {
-            0
-        };
+        eprintln!("DEBUG: total msgs={}, affected={}", msg_count, affected);
 
         // Now send actual COMMIT
         let commit = CommitMessage;
@@ -831,7 +841,11 @@ impl Client {
     /// For OPE(91) the server may send a sequence of messages:
     ///   ACK(187) with data → ACK(187) empty → EXEC_RESPONSE(0) with data
     /// We consume all of them and extract affected row count / result data.
-    fn read_exec_response(&mut self) -> Result<ResultSet> {
+    ///
+    /// `has_result_set` indicates whether this is a SELECT query (true) or DML (false).
+    /// For BIND_EXEC2 SELECT queries, the server returns col_count=0 and we should
+    /// not try to parse inline data — it must be fetched via FETCH.
+    fn read_exec_response(&mut self, has_result_set: bool) -> Result<ResultSet> {
         let (frame, payload) = self.read_message()?;
 
         // Check for error response (negative response_code)
@@ -853,15 +867,9 @@ impl Client {
         }
 
         if frame.msg_type == ACK && payload.is_empty() {
-            // OPE(91) DML: empty ACK followed by EXEC_RESPONSE with actual data.
-            // Get affected rows from the EXEC_RESPONSE frame header.
-            let affected = self.consume_remaining_ope_messages()?;
-            return Ok(ResultSet::with_data(
-                Vec::new(),
-                Vec::new(),
-                0,
-                affected,
-            ));
+            // OPE(91) DML: empty ACK with affected rows in header reserved area at offset 24.
+            let affected = frame.update_count;
+            return Ok(ResultSet::with_data(Vec::new(), Vec::new(), 0, affected));
         }
 
         if frame.msg_type == ACK {
@@ -886,6 +894,22 @@ impl Client {
 
         if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
             let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
+
+            // For BIND_EXEC2 SELECT queries: server returns col_count=0.
+            // Do NOT parse inline data (it's garbage) — let the caller use FETCH.
+            if has_result_set && resp.col_count == 0 && !resp.columns.is_empty() {
+                // This shouldn't happen if guard is correct, but be safe.
+                // Fall through to normal path.
+            } else if has_result_set && resp.col_count == 0 && resp.columns.is_empty() {
+                // BIND_EXEC2 SELECT: no inline data, will be fetched via FETCH.
+                return Ok(ResultSet::with_data(
+                    Vec::new(),
+                    Vec::new(),
+                    0,
+                    resp.row_count as u64,
+                ));
+            }
+
             return Ok(ResultSet::with_data(
                 resp.columns,
                 resp.rows,
@@ -909,7 +933,7 @@ impl Client {
 
         // Try to read one more message with a short timeout
         if let Some(Ok((frame, payload))) =
-            self.try_read_message(std::time::Duration::from_millis(500))
+            self.try_read_message(std::time::Duration::from_millis(2000))
         {
             if frame.response_code < 0 {
                 return Err(Error::QueryFailed(format!(
@@ -919,7 +943,7 @@ impl Client {
             // If we got an empty ACK, try one more (EXEC_RESPONSE with affected rows in frame header)
             if frame.msg_type == ACK && payload.is_empty() {
                 if let Some(Ok((f3, _p3))) =
-                    self.try_read_message(std::time::Duration::from_millis(500))
+                    self.try_read_message(std::time::Duration::from_millis(2000))
                 {
                     if f3.response_code < 0 {
                         return Err(Error::QueryFailed(format!(
@@ -939,104 +963,72 @@ impl Client {
         Ok(affected)
     }
 
-    /// Try to read a single message with a timeout.
-    /// Returns None if no message is available within the timeout,
-    /// Some(Ok(...)) on success, Some(Err(...)) on error.
+    /// Try to read a single message with polling.
+/// The `timeout` is the maximum time to wait for data.
+/// Returns None if no message arrives within the timeout.
+/// Some(Ok(...)) on success, Some(Err(...)) on error.
     fn try_read_message(&mut self, timeout: std::time::Duration) -> Option<Result<(Frame, Vec<u8>)>> {
         use std::io::ErrorKind;
 
         let stream = self.stream.as_mut()?;
-
-        // Set temporary timeout
-        let _ = stream.set_read_timeout(Some(timeout));
-
+        let deadline = std::time::Instant::now() + timeout;
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + 4096);
 
-        // Read frame header
+        // Read frame header with polling
         loop {
             if buf.len() >= FRAME_HEADER_SIZE {
                 break;
             }
+            if std::time::Instant::now() > deadline {
+                return None;
+            }
             let mut tmp = vec![0u8; 1024];
             match stream.read(&mut tmp) {
-                Ok(0) => {
-                    let _ = stream.set_read_timeout(None);
-                    return None;
-                }
-                Ok(n) => {
-                    buf.extend_from_slice(&tmp[..n]);
-                }
+                Ok(0) => return None,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
                 Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
-                    let _ = stream.set_read_timeout(None);
-                    return None;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(e) => {
-                    let _ = stream.set_read_timeout(None);
-                    return Some(Err(Error::Io(e)));
-                }
+                Err(e) => return Some(Err(Error::Io(e))),
             }
         }
 
         let frame = match Frame::parse(&mut buf) {
             Ok(f) => f,
-            Err(_) => {
-                let _ = stream.set_read_timeout(None);
-                return None;
-            }
+            Err(_) => return None,
         };
 
-        // Restore timeout
-        let _ = stream.set_read_timeout(None);
-
-        // Read payload
+        // Read payload with polling
         let body_len = frame.body_len.max(0) as usize;
         while buf.len() < body_len {
-            let mut tmp = vec![0u8; 1024];
-            let n = loop {
-                match stream.read(&mut tmp) {
-                    Ok(n) => break n,
-                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    }
-                    Err(e) => return Some(Err(Error::Io(e))),
-                }
-            };
-            if n == 0 {
-                return Some(Err(Error::ConnectionFailed(
-                    "connection closed during payload read".to_string(),
-                )));
+            if std::time::Instant::now() > deadline {
+                return None;
             }
-            buf.extend_from_slice(&tmp[..n]);
+            let mut tmp = vec![0u8; 1024];
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(e) => return Some(Err(Error::Io(e))),
+            }
         }
 
-        let payload = buf[..body_len].to_vec();
-
-        Some(Ok((frame, payload)))
+        Some(Ok((frame, buf.to_vec())))
     }
 
     /// Execute a SQL SELECT query and return the result set.
+    ///
+    /// Does NOT auto-commit (SELECT queries should not trigger commits).
     pub fn query(&mut self, sql: &str) -> Result<ResultSet> {
         if !matches!(self.state, State::Ready) {
             return Err(Error::NotConnected);
         }
-
-        let ready_frame = Frame::new(READY, 0, 0);
-        self.write_all(&ready_frame.encode())?;
-        self.read_message()?;
-
-        // Use OPE(91) for SELECT — returns ACK with inline EXEC_RESPONSE data
-        let exec = ExecMessage::new(sql, 0);
-        let exec_payload = exec.encode_payload();
-        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
-        self.read_exec_response()
+        self.do_prepare_execute(&[], sql, true)
     }
 
     /// Fetch more rows from a result set using the FETCH protocol (msg_type=7).
-    ///
-    /// This enables pagination for large result sets, avoiding loading all rows
-    /// into memory at once. After calling `query()` or `execute_with_params()`,
-    /// use this method to retrieve the next batch of rows.
     ///
     /// # Arguments
     /// * `result_set` - The ResultSet from the initial query (will be mutated)
@@ -1155,18 +1147,22 @@ impl Client {
     }
 
     /// Read a complete message (frame + payload) from the stream.
+    /// Reads exactly one frame at a time — never over-reads past the current
+    /// frame boundary, because over-read data would be silently dropped.
     fn read_message(&mut self) -> Result<(Frame, Vec<u8>)> {
         use std::io::ErrorKind;
 
         let stream = self.stream.as_mut().ok_or(Error::NotConnected)?;
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + 4096);
 
-        // Read frame header - retry on EAGAIN/EWOULDBLOCK
+        // Read exactly FRAME_HEADER_SIZE bytes for the header.
+        // Reading more in one chunk would swallow the next message if both
+        // arrive in the same TCP packet (e.g. ACK + EXEC_RESPONSE after DML).
         loop {
             if buf.len() >= FRAME_HEADER_SIZE {
                 break;
             }
-            let mut tmp = vec![0u8; 1024];
+            let mut tmp = vec![0u8; FRAME_HEADER_SIZE];
             let n = loop {
                 match stream.read(&mut tmp) {
                     Ok(n) => break n,

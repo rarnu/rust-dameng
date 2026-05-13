@@ -465,6 +465,12 @@ impl ExecResponse {
             });
         }
 
+        eprintln!(
+            "DEBUG from_bytes header: row_count={}, first32_after_hdr={:02x?}",
+            header_row_count,
+            &data[16..32]
+        );
+
         // === First Column Header (16 bytes, offset 16) ===
         // Note: first_col_type at offset 16 is unreliable on DM 8.1 — always returns 4 (INT).
         // We derive the correct type_code from the type_name string instead.
@@ -479,6 +485,9 @@ impl ExecResponse {
         let mut columns = Vec::with_capacity(col_count as usize);
         let mut offset = 32; // Column variable data starts at 32
 
+        // When col_count > 0, parse first column from the compact 16-byte header.
+        // When col_count == 0 (BIND_EXEC2 path), all columns use the expanded 32-byte
+        // format starting at offset 16 — skip the compact header parsing entirely.
         if col_count > 0 {
             // col_name (explicit length from col_name_len field at offset 24-25)
             let col_name = if col_name_len > 0 && offset + col_name_len <= data.len() {
@@ -539,6 +548,10 @@ impl ExecResponse {
         // For sub_type=7 (full SELECT), OPE(91) may report col_count=1 even for
         // multi-column queries. Parse columns dynamically until we hit row data.
         //
+        // When col_count == 0 (BIND_EXEC2 path for SELECT with params), the server
+        // sends NO inline column metadata or row data — the data must be fetched
+        // via FETCH protocol. In this case skip dynamic parsing entirely.
+        //
         // Verified against DM 8.1.3.62 wire protocol:
         // First column: 16-byte compact header (already parsed above)
         // Subsequent columns: 32-byte expanded header (NO gap between columns):
@@ -554,7 +567,7 @@ impl ExecResponse {
         //  28   u16  table_name_len
         //  30   u16  schema_name_len
         //  32   [col_name][type_name][table_name][schema_name] (no null terminator)
-        let use_dynamic = sub_type == 7;
+        let use_dynamic = sub_type == 7 && col_count > 0;
         let max_cols = if use_dynamic { 32 } else { col_count as usize };
         let mut parsed_cols = 1;
         while parsed_cols < max_cols {
@@ -674,6 +687,13 @@ impl ExecResponse {
         // Two row formats depending on sub_type:
         //   sub_type=2: compact format (V$VERSION style) - marker(1)+flags(1)+val_size(2)+value(N)
         //   sub_type=7: full format (SELECT style) - row_hdr+col_offsets+values
+        eprintln!(
+            "DEBUG ExecResponse::from_bytes: sub_type={}, col_count={}, offset={}, data.len()={}",
+            sub_type,
+            columns.len(),
+            offset,
+            data.len()
+        );
         let mut rows = Vec::new();
         if sub_type == 2 {
             // Compact row format (V$VERSION style):
