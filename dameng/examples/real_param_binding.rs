@@ -168,12 +168,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = if row.is_null(2) {
             String::from("NULL")
         } else {
-            row.get_str(2).ok().unwrap_or_default()
+            row.get_str(2).ok().unwrap_or_default().to_string()
         };
         let phone = if row.is_null(3) {
             String::from("NULL")
         } else {
-            row.get_str(3).ok().unwrap_or_default()
+            row.get_str(3).ok().unwrap_or_default().to_string()
         };
         println!(
             "  ID={}, NAME={}, ADDRESS={}, PHONE={}",

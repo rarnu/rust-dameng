@@ -19,3 +19,6 @@ pub use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessag
 
 // Re-export ToDmValue trait for SQLx-style dynamic binding
 pub use dameng_types::ToDmValue;
+
+// Re-export row types
+pub use row::{DmDecode, QueryRow, QueryRowRef, ResultSet, ResultSetIter};

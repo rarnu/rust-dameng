@@ -189,25 +189,17 @@ impl Row {
         Ok(i64::from_le_bytes([val[0], val[1], val[2], val[3], val[4], val[5], val[6], val[7]]))
     }
 
-    /// Get a String value at the given column index.
+    /// Get a &str value at the given column index.
     ///
     /// For text types (VARCHAR, CHAR, CLOB) this reads UTF-8 directly.
-    /// For binary types (TIMESTAMP, DATE, TIME) this uses decode_value
-    /// to produce a human-readable string representation.
-    pub fn get_str(&self, idx: usize) -> Result<String> {
+    pub fn get_str(&self, idx: usize) -> Result<&str> {
         let val = self.values.get(idx).and_then(|v| v.as_ref())
             .ok_or(crate::error::Error::DecodeError(format!(
                 "column {} is NULL or out of range", idx
             )))?;
-
-        // Try UTF-8 first; if it fails, try lossy decode as fallback.
-        match String::from_utf8(val.clone()) {
-            Ok(s) => Ok(s),
-            Err(_) => {
-                // Binary data — use lossy UTF-8 as a safe fallback
-                Ok(String::from_utf8_lossy(val).to_string())
-            }
-        }
+        std::str::from_utf8(val).map_err(|e| {
+            crate::error::Error::DecodeError(format!("invalid UTF-8: {}", e))
+        })
     }
 
     /// Get a f64 value at the given column index.
@@ -275,8 +267,8 @@ impl Row {
                 year, month, day, hour, minute, second
             ))
         } else {
-            // Fallback: UTF-8 or lossy
-            self.get_str(idx)
+            // Fallback: UTF-8 or lossy via get_string
+            self.get_string(idx)
         }
     }
 
@@ -299,7 +291,7 @@ impl Row {
                 year, month, day, hour, minute, second
             ))
         } else {
-            self.get_str(idx)
+            self.get_string(idx)
         }
     }
 
@@ -402,10 +394,12 @@ impl Row {
         }
     }
 
-    /// Get an Option<String> at the given column index (NULL-safe).
-    pub fn get_opt_str(&self, idx: usize) -> Result<Option<String>> {
+    /// Get an Option<&str> at the given column index (NULL-safe).
+    pub fn get_opt_str(&self, idx: usize) -> Result<Option<&str>> {
         match self.values.get(idx) {
-            Some(Some(v)) if !v.is_empty() => Ok(Some(self.get_str(idx)?)),
+            Some(Some(v)) if !v.is_empty() => Ok(Some(std::str::from_utf8(v).map_err(|e| {
+                crate::error::Error::DecodeError(format!("invalid UTF-8: {}", e))
+            })?)),
             _ => Ok(None),
         }
     }
@@ -416,6 +410,18 @@ impl Row {
             Some(Some(v)) if !v.is_empty() => Ok(Some(self.get_f64(idx)?)),
             _ => Ok(None),
         }
+    }
+
+    /// Get an owned String at the given column index (uses lossy UTF-8 fallback).
+    ///
+    /// Unlike `get_str()` which returns a borrowed `&str` and fails on invalid UTF-8,
+    /// this method always succeeds by replacing invalid sequences with U+FFFD.
+    /// Useful for binary-ish data or server status strings.
+    pub fn get_string(&self, idx: usize) -> Result<String> {
+        let val = self.values.get(idx).and_then(|v| v.as_ref()).ok_or(
+            crate::error::Error::DecodeError(format!("column {} is NULL or out of range", idx)),
+        )?;
+        Ok(String::from_utf8_lossy(val).into_owned())
     }
 
     /// Placeholder: find column index by name (case-insensitive match).

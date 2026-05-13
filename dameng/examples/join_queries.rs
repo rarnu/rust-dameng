@@ -67,12 +67,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = if row.is_null(2) {
             "NULL".to_string()
         } else {
-            row.get_str(2)?
+            row.get_str(2)?.to_string()
         };
         let phone = if row.is_null(3) {
             "NULL".to_string()
         } else {
-            row.get_str(3)?
+            row.get_str(3)?.to_string()
         };
         println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
     }
@@ -101,12 +101,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = if row.is_null(2) {
             "NULL".to_string()
         } else {
-            row.get_str(2)?
+            row.get_str(2)?.to_string()
         };
         let phone = if row.is_null(3) {
             "NULL".to_string()
         } else {
-            row.get_str(3)?
+            row.get_str(3)?.to_string()
         };
         println!("  ID={}, NAME={}, ADDRESS={}, PHONE={}", id, name, addr, phone);
     }
@@ -129,17 +129,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = if row.is_null(2) {
             "NULL".to_string()
         } else {
-            row.get_str(2)?
+            row.get_str(2)?.to_string()
         };
         let item = if row.is_null(3) {
             "NULL".to_string()
         } else {
-            row.get_str(3)?
+            row.get_str(3)?.to_string()
         };
         let time = if row.is_null(4) {
             "NULL".to_string()
         } else {
-            row.get_str(4)?
+            row.get_str(4)?.to_string()
         };
         println!(
             "  ID={}, NAME={}, ADDRESS={}, ITEM={}, BUY_TIME={}",

@@ -143,7 +143,7 @@ impl<'a> Query<'a> {
     /// Execute the query and get the first String value.
     pub async fn fetch_str(self) -> Result<String> {
         let row = self.fetch_one().await?;
-        row.get_str(0).map_err(|e| Error::DecodeError(e.to_string()))
+        row.get_string(0).map_err(|e| Error::DecodeError(e.to_string()))
     }
 
     /// Execute the query and get the first i64 value.

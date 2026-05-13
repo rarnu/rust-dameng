@@ -62,8 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 验证更新结果
     let rs = client.query("SELECT NAME, CNT FROM dm_test_ar WHERE ID = 1")?;
     let row = rs.iter().next().unwrap();
-    let name = row.get_str(1).unwrap();
-    let cnt = row.get_i32(2).unwrap();
+    let name = row.get_str(0).unwrap();
+    let cnt = row.get_i32(1).unwrap();
     println!("  Verified: NAME='{}', CNT={}", name, cnt);
     assert_eq!(name, "Alice2");
     assert_eq!(cnt, 100);

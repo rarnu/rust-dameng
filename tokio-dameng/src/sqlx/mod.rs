@@ -207,7 +207,7 @@ impl<'a> Query<'a> {
         let row = rs.rows.first().ok_or_else(|| {
             crate::error::Error::QueryFailed("no rows returned".to_string())
         })?;
-        row.get_str(0).map_err(|e| {
+        row.get_string(0).map_err(|e| {
             crate::error::Error::DecodeError(format!("decode string failed: {}", e))
         })
     }

@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Columns: {:?}", rs.columns.iter().map(|c| &c.name).collect::<Vec<_>>());
     for row in rs.iter() {
         let id = row.get_i32(0).ok().map(|v| format!("{}", v)).unwrap_or_default();
-        let name = row.get_str(0).ok().unwrap_or_default();
+        let name = row.get_str(1).ok().unwrap_or_default();
         println!("  ID={}, NAME={}", id, name);
     }
 

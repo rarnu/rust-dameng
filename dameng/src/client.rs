@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use native_tls::{TlsConnector, TlsStream as NativeTlsStream};
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
 use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
@@ -540,42 +540,78 @@ impl Client {
             return Ok(rs);
         }
 
-        // With params: EXEC(5) prepare → BIND_EXEC2 → read result
-        // READY
+        // With params: use OPE(91) with params embedded directly in payload
+        // DM 8.1 OPE(91) format: 20-byte header + param_descriptors + SQL + null
+        //
+        // 20-byte header (at payload offset 0):
+        //   0: auto_commit (1 byte)
+        //   1: param_count (2 bytes u16 LE)
+        //   3: has_result_set (1 byte)
+        //   4: reserved (4 bytes, zero)
+        //   8: param value offset (8 bytes i64 LE) = offset to where param values start
+        //
+        // Then param descriptors:
+        //   For each param: ioType(1) + typeCode(4) + precision(4) + scale(4) = 13 bytes each
+        //
+        // Then SQL text + null terminator
         self.write_all(&Frame::new(READY, 0, 0).encode())?;
         self.read_message()?;
 
-        // EXEC(5) to PREPARE the statement
-        let exec = ExecMessage::new(sql, 0);
-        self.write_all(&build_message(EXEC, self.handle, &exec.encode_payload()))?;
-        let (exec_frame, exec_payload) = self.read_message()?;
-        if exec_frame.response_code < 0 {
-            let msg = String::from_utf8_lossy(&exec_payload);
-            return Err(Error::QueryFailed(format!(
-                "prepare failed: code={} type={} payload={}",
-                exec_frame.response_code, exec_frame.msg_type, msg
-            )));
+        let sql_bytes = sql.as_bytes();
+
+        // Calculate sizes
+        let param_desc_size = params.len() * 13; // ioType(1) + typeCode(4) + prec(4) + scale(4)
+        let param_value_offset = 20 + param_desc_size; // after descriptors, before values
+        
+        // Build 20-byte header
+        let mut header = vec![0u8; 20];
+        header[0] = if self.auto_commit { 1 } else { 0 };
+        header[1..3].copy_from_slice(&(params.len() as u16).to_le_bytes());
+        header[3] = if has_result_set { 1 } else { 0 };
+        header[8..16].copy_from_slice(&(param_value_offset as i64).to_le_bytes());
+        
+        // Build payload: header + param descriptors + param values + SQL
+        let mut payload = header;
+        
+        // Param descriptors
+        for param in params {
+            payload.push(param.direction as u8); // ioType
+            payload.extend_from_slice(&param.type_code.to_le_bytes());
+            payload.extend_from_slice(&param.precision.to_le_bytes());
+            payload.extend_from_slice(&param.scale.to_le_bytes());
         }
-
-        // stmt_id: EXEC(5) reuses the connection handle for statement context
-        let stmt_id = self.handle;
-
-        // LOB streaming for off-row params (BLOB/CLOB > 2048 bytes)
-        self.stream_lob_params(stmt_id, params)?;
-
-        // BIND_EXEC2: bind parameters and execute
-        let bind_params = self.clear_off_row_placeholders(params);
-        let bind_exec2 = BindExec2Message::new(false, has_result_set, bind_params);
-        let bind_payload = bind_exec2.encode_payload();
-        self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
-
-        // Read result — pass has_result_set so DML doesn't incorrectly enter FETCH path
+        
+        // Param values: for each param, write raw value bytes directly
+        for param in params {
+            match &param.value {
+                Some(val) => payload.extend_from_slice(val),
+                None => {} // NULL - write nothing (server handles via NULL indicator)
+            }
+        }
+        
+        // SQL + null
+        payload.extend_from_slice(sql_bytes);
+        payload.push(0);
+        
+        // Send OPE(91) with params embedded
+        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, self.handle, &payload))?;
+        
+        // Read response
         let mut rs = self.read_exec_response(has_result_set)?;
 
-        // For SELECT with params, BIND_EXEC2 may return col_count=0 and total_row_count > 0.
+        eprintln!(
+            "DEBUG OPE(91) with params: has_result_set={} cols={} rows={} total={} cursor_id={}",
+            has_result_set,
+            rs.columns.len(),
+            rs.rows.len(),
+            rs.total_row_count,
+            rs.cursor_id,
+        );
+
+        // For SELECT with params, OPE(91) may return col_count=0 and total_row_count > 0.
         // In this case the server expects us to use FETCH to retrieve the data.
         if has_result_set && rs.columns.is_empty() && rs.total_row_count > 0 {
-            rs = self.fetch_from_bind_exec(stmt_id, rs.total_row_count)?;
+            rs = self.fetch_from_bind_exec(self.handle, rs.total_row_count)?;
         }
 
         // Auto-commit for DML (non-SELECT) when auto_commit is on
@@ -660,7 +696,8 @@ impl Client {
         loop {
             let fetch = FetchMessage::new(start_row, 0, prefetch);
             let fetch_payload = fetch.encode_payload();
-            self.write_all(&build_message(FETCH, stmt_id, &fetch_payload))?;
+            // Use connection handle (self.handle), not stmt_id, matching fetch_more()
+            self.write_all(&build_message(FETCH, self.handle, &fetch_payload))?;
 
             let (frame, payload) = self.read_message()?;
             if frame.response_code < 0 {
@@ -851,6 +888,9 @@ impl Client {
     /// not try to parse inline data — it must be fetched via FETCH.
     fn read_exec_response(&mut self, has_result_set: bool) -> Result<ResultSet> {
         let (frame, payload) = self.read_message()?;
+
+        eprintln!("DEBUG read_exec_response: msg_type={} response_code={} body_len={} payload_len={} has_result_set={}",
+            frame.msg_type, frame.response_code, frame.body_len, payload.len(), has_result_set);
 
         // Check for error response (negative response_code)
         if frame.response_code < 0 {

@@ -2,9 +2,11 @@
 //!
 //! Provides SQLx-style `row.get::<T>(idx)` API and iterator support.
 
+use std::ops::Deref;
+
 use dameng_protocol::Row;
 
-pub use dameng_protocol::{Column};
+pub use dameng_protocol::Column;
 
 /// A query result set containing columns and rows.
 #[derive(Debug, Clone)]
@@ -38,6 +40,13 @@ pub struct QueryRowRef<'a> {
     pub row: &'a Row,
     /// Column metadata reference.
     pub columns: &'a [Column],
+}
+
+impl<'a> Deref for QueryRowRef<'a> {
+    type Target = Row;
+    fn deref(&self) -> &Self::Target {
+        self.row
+    }
 }
 
 // ─── IntoIterator for ResultSet (consuming) ─────────────────────────────────
@@ -112,6 +121,18 @@ pub trait DmDecode<'de>: Sized {
     /// Decode from an optional byte slice.
     /// `None` means NULL, `Some(&[])` means an empty (non-NULL) value.
     fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self>;
+}
+
+impl<'de> DmDecode<'de> for bool {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column value is empty".to_string()));
+        }
+        Ok(bytes[0] != 0)
+    }
 }
 
 impl<'de> DmDecode<'de> for i32 {
@@ -189,6 +210,84 @@ impl<'de> DmDecode<'de> for i8 {
             return Err(crate::error::Error::DecodeError("column is NULL".to_string()));
         }
         Ok(bytes[0] as i8)
+    }
+}
+
+impl<'de> DmDecode<'de> for u32 {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column value is empty".to_string()));
+        }
+        if bytes.len() < 4 {
+            if bytes.len() == 1 {
+                return Ok(bytes[0] as u32);
+            }
+            if bytes.len() == 2 {
+                return Ok(u16::from_le_bytes([bytes[0], bytes[1]]) as u32);
+            }
+            return Err(crate::error::Error::DecodeError(format!(
+                "too short for u32: {} bytes", bytes.len()
+            )));
+        }
+        let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+        Ok(u32::from_le_bytes(arr))
+    }
+}
+
+impl<'de> DmDecode<'de> for u64 {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column value is empty".to_string()));
+        }
+        if bytes.len() < 8 {
+            if bytes.len() >= 4 {
+                let arr: [u8; 4] = bytes[..4].try_into().unwrap();
+                return Ok(u32::from_le_bytes(arr) as u64);
+            }
+            return Err(crate::error::Error::DecodeError(format!(
+                "too short for u64: {} bytes", bytes.len()
+            )));
+        }
+        let arr: [u8; 8] = bytes[..8].try_into().unwrap();
+        Ok(u64::from_le_bytes(arr))
+    }
+}
+
+impl<'de> DmDecode<'de> for u16 {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column value is empty".to_string()));
+        }
+        if bytes.len() < 2 {
+            if bytes.len() == 1 {
+                return Ok(bytes[0] as u16);
+            }
+            return Err(crate::error::Error::DecodeError(format!(
+                "too short for u16: {} bytes", bytes.len()
+            )));
+        }
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+}
+
+impl<'de> DmDecode<'de> for u8 {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column is NULL".to_string()));
+        }
+        Ok(bytes[0])
     }
 }
 
@@ -273,10 +372,15 @@ macro_rules! impl_dm_decode_option {
     };
 }
 
+impl_dm_decode_option!(bool);
 impl_dm_decode_option!(i32);
 impl_dm_decode_option!(i64);
 impl_dm_decode_option!(i16);
 impl_dm_decode_option!(i8);
+impl_dm_decode_option!(u32);
+impl_dm_decode_option!(u64);
+impl_dm_decode_option!(u16);
+impl_dm_decode_option!(u8);
 impl_dm_decode_option!(f64);
 impl_dm_decode_option!(f32);
 
@@ -372,19 +476,42 @@ impl ResultSet {
         self.rows.len()
     }
 
-    /// Get the first row, if any.
-    pub fn first(&self) -> Option<&Row> {
-        self.rows.first()
+    /// Get the first row, if any (returns a QueryRowRef with column metadata).
+    pub fn first(&self) -> Option<QueryRowRef<'_>> {
+        self.rows.first().map(|row| QueryRowRef {
+            row,
+            columns: &self.columns,
+        })
     }
 
-    /// Iterate over rows.
-    pub fn iter(&self) -> impl Iterator<Item = &Row> {
-        self.rows.iter()
+    /// Iterate over rows with column metadata (borrowing).
+    ///
+    /// Supports SQLx-style type inference:
+    /// ```ignore
+    /// for row in rs.iter() {
+    ///     let id: i32 = row.get(0)?;
+    ///     let name: &str = row.get(1)?;
+    /// }
+    /// ```
+    ///
+    /// Also supports protocol-level methods via `Deref`:
+    /// ```ignore
+    /// for row in rs.iter() {
+    ///     let id = row.get_i32(0)?;
+    ///     let name = row.get_str(1)?;
+    /// }
+    /// ```
+    pub fn iter(&self) -> ResultSetIter<'_> {
+        ResultSetIter {
+            result_set: self,
+            current: 0,
+        }
     }
 
     /// Iterate over rows with access to column metadata (borrowing).
-    pub fn iter_rows(&self) -> impl Iterator<Item = QueryRowRef<'_>> {
-        self.into_iter()
+    /// Alias for `iter()`.
+    pub fn iter_rows(&self) -> ResultSetIter<'_> {
+        self.iter()
     }
 
     /// Get column metadata by name.
@@ -490,5 +617,73 @@ mod tests {
         );
         let ids: Vec<i32> = rs.into_iter().map(|r| r.get::<i32>(0).unwrap()).collect();
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn test_query_row_get_u32() {
+        let qrow = QueryRow {
+            row: Row {
+                row_id: 0,
+                values: vec![Some(vec![100, 0, 0, 0])],
+            },
+            columns: vec![],
+        };
+        assert_eq!(qrow.get::<u32>(0).unwrap(), 100u32);
+    }
+
+    #[test]
+    fn test_query_row_get_u64() {
+        let qrow = QueryRow {
+            row: Row {
+                row_id: 0,
+                values: vec![Some(vec![0xe8, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])],
+            },
+            columns: vec![],
+        };
+        assert_eq!(qrow.get::<u64>(0).unwrap(), 1000u64);
+    }
+
+    #[test]
+    fn test_query_row_get_bool() {
+        let qrow = QueryRow {
+            row: Row {
+                row_id: 0,
+                values: vec![Some(vec![1]), Some(vec![0])],
+            },
+            columns: vec![],
+        };
+        assert_eq!(qrow.get::<bool>(0).unwrap(), true);
+        assert_eq!(qrow.get::<bool>(1).unwrap(), false);
+    }
+
+    #[test]
+    fn test_query_row_deref_get_str() {
+        // Test that Deref<Target=Row> works for protocol-level methods
+        let qrow = QueryRow {
+            row: Row {
+                row_id: 0,
+                values: vec![Some(b"Hello".to_vec())],
+            },
+            columns: vec![],
+        };
+        // get_str is on Row, accessible via row.field
+        assert_eq!(qrow.row.get_str(0).unwrap(), "Hello");
+    }
+
+    #[test]
+    fn test_result_set_iter_deref() {
+        // Test that rs.iter() returning QueryRowRef still supports
+        // protocol-level methods via Deref
+        let rs = ResultSet::with_data(
+            vec![],
+            vec![Row { row_id: 0, values: vec![Some(vec![1, 0, 0, 0]), Some(b"Alice".to_vec())] }],
+            0, 1,
+        );
+        for row in rs.iter() {
+            let id = row.get_i32(0).unwrap();
+            let name = row.get_str(1).unwrap();
+            assert_eq!(id, 1);
+            assert_eq!(name, "Alice");
+        }
     }
 }
