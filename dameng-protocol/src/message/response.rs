@@ -465,12 +465,6 @@ impl ExecResponse {
             });
         }
 
-        eprintln!(
-            "DEBUG from_bytes header: row_count={}, first32_after_hdr={:02x?}",
-            header_row_count,
-            &data[16..32]
-        );
-
         // === First Column Header (16 bytes, offset 16) ===
         // Note: first_col_type at offset 16 is unreliable on DM 8.1 — always returns 4 (INT).
         // We derive the correct type_code from the type_name string instead.
@@ -687,13 +681,6 @@ impl ExecResponse {
         // Two row formats depending on sub_type:
         //   sub_type=2: compact format (V$VERSION style) - marker(1)+flags(1)+val_size(2)+value(N)
         //   sub_type=7: full format (SELECT style) - row_hdr+col_offsets+values
-        eprintln!(
-            "DEBUG ExecResponse::from_bytes: sub_type={}, col_count={}, offset={}, data.len()={}",
-            sub_type,
-            columns.len(),
-            offset,
-            data.len()
-        );
         let mut rows = Vec::new();
         if sub_type == 2 {
             // Compact row format (V$VERSION style):

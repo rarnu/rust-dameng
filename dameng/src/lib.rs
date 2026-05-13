@@ -11,7 +11,7 @@ pub mod row;
 pub use client::Client;
 pub use config::ConnectOptions;
 pub use error::{Error, Result};
-pub use row::Row;
+pub use dameng_protocol::Row;
 
 // Re-export protocol types needed for parameter binding
 pub use dameng_protocol::message::{BindParam, ParameterDirection};

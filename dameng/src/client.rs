@@ -532,7 +532,7 @@ impl Client {
                 &exec.encode_payload(),
             ))?;
 
-            let rs = self.read_exec_response(false)?;
+            let rs = self.read_exec_response(has_result_set)?;
 
             if self.auto_commit && !has_result_set {
                 self.do_commit()?;
@@ -843,6 +843,10 @@ impl Client {
     /// We consume all of them and extract affected row count / result data.
     ///
     /// `has_result_set` indicates whether this is a SELECT query (true) or DML (false).
+    /// For SELECT queries via OPE(91), the server returns a single ACK with inline
+    /// data — no trailing messages to consume.
+    /// For DML via OPE(91), the server returns an empty ACK (update_count in header)
+    /// with no trailing messages either.
     /// For BIND_EXEC2 SELECT queries, the server returns col_count=0 and we should
     /// not try to parse inline data — it must be fetched via FETCH.
     fn read_exec_response(&mut self, has_result_set: bool) -> Result<ResultSet> {
@@ -873,17 +877,18 @@ impl Client {
         }
 
         if frame.msg_type == ACK {
-            // OPE(91) returns ACK with inline row data in payload.
-            // After this, there may be more messages (empty ACK + EXEC_RESPONSE)
-            // that we need to consume to keep the connection in sync.
+            // OPE(91) SELECT: ACK with inline row data in payload.
+            // For SELECT queries this is the complete response — no trailing messages.
+            // For DML queries there may be trailing messages, handled after parsing.
             let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
-            // Consume any trailing messages from the OPE response sequence
-            let trailing = self.consume_remaining_ope_messages()?;
-            let total = if resp.row_count > 0 {
-                resp.row_count as u64
-            } else {
-                trailing
-            };
+            let mut total = resp.row_count as u64;
+            if !has_result_set {
+                // DML with trailing messages (rare path)
+                let trailing = self.consume_remaining_ope_messages()?;
+                if resp.row_count == 0 {
+                    total = trailing;
+                }
+            }
             return Ok(ResultSet::with_data(
                 resp.columns,
                 resp.rows,
