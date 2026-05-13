@@ -8,7 +8,7 @@
 //! 5       1     Reserved (0)
 //! 6       4     BodyLen (i32 LE) - length of payload after header
 //! 10      4     ResponseCode (i32 LE) - filled by server
-//! 14      4     Reserved (0)
+//! 14      4     AffectedRows (i32 LE) - rows affected (for DML responses)
 //! 18      1     CompressFlag (u8)
 //! 19      1     Checksum (u8) - XOR of bytes 0-18
 //! 20      44    Reserved (zeros)
@@ -33,6 +33,9 @@ pub struct Frame {
     pub body_len: i32,
     /// Response code from server (0 for client messages).
     pub response_code: i32,
+    /// Number of rows affected (for DML responses like INSERT/UPDATE/DELETE).
+    /// Set by the server in ACK/EXEC_RESPONSE frames; 0 for non-DML.
+    pub affected_rows: i32,
     /// Compression flag (0=none, 1=snappy, 2=zlib).
     pub compress_flag: u8,
 }
@@ -45,10 +48,14 @@ impl Frame {
             msg_type,
             body_len,
             response_code: 0,
+            affected_rows: 0,
             compress_flag: 0,
         }
     }
 
+    /// Parse a frame header from a buffer.
+    ///
+    /// Returns `Err(Error::Incomplete)` if fewer than 64 bytes are available.
     /// Parse a frame header from a buffer.
     ///
     /// Returns `Err(Error::Incomplete)` if fewer than 64 bytes are available.
@@ -68,7 +75,7 @@ impl Frame {
         let _reserved = buf.get_u8();
         let body_len = buf.get_i32_le();
         let response_code = buf.get_i32_le();
-        let _reserved = buf.get_i32_le();
+        let affected_rows = buf.get_i32_le();
         let compress_flag = buf.get_u8();
         let checksum = buf.get_u8();
 
@@ -84,6 +91,7 @@ impl Frame {
             msg_type,
             body_len,
             response_code,
+            affected_rows,
             compress_flag,
         })
     }

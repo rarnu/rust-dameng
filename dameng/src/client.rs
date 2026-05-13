@@ -158,6 +158,13 @@ impl Stream {
             }
         }
     }
+
+    fn set_read_timeout(&mut self, dur: Option<std::time::Duration>) -> std::io::Result<()> {
+        match self {
+            Stream::Tcp(s) => s.set_read_timeout(dur),
+            Stream::Tls(s) => s.get_ref().set_read_timeout(dur),
+        }
+    }
 }
 
 /// Connection state.
@@ -377,8 +384,6 @@ impl Client {
         let payload = alloc.encode_payload();
         self.write_all(&build_message(STATEMENT_PREPARE, 0, &payload))?;
         let (frame, resp_payload) = self.read_message()?;
-        eprintln!("DEBUG: allocate resp: code={} type={} payload_len={} first24={:02?}",
-            frame.response_code, frame.msg_type, resp_payload.len(), &resp_payload[..resp_payload.len().min(24)]);
         if frame.response_code < 0 {
             return Err(Error::ConnectionFailed(format!(
                 "allocate statement failed: code={}",
@@ -387,7 +392,6 @@ impl Client {
         }
         let stmt_id = StatementAllocateMessage::parse_response(&resp_payload)
             .map_err(|e| Error::Protocol(e))?;
-        eprintln!("DEBUG: parsed stmt_id={}", stmt_id);
         Ok(stmt_id)
     }
 
@@ -519,13 +523,6 @@ impl Client {
         let exec = ExecMessage::new(sql, 0);
         self.write_all(&build_message(EXEC, stmt_id, &exec.encode_payload()))?;
         let (exec_frame, exec_payload) = self.read_message()?;
-        eprintln!(
-            "DEBUG DML EXEC(5) resp: code={} type={} payload_len={} first32={:02?}",
-            exec_frame.response_code,
-            exec_frame.msg_type,
-            exec_payload.len(),
-            &exec_payload[..exec_payload.len().min(32)]
-        );
         if exec_frame.response_code < 0 {
             let msg = String::from_utf8_lossy(&exec_payload);
             return Err(Error::QueryFailed(format!(
@@ -542,29 +539,15 @@ impl Client {
         let bind_params = self.clear_off_row_placeholders(params);
         let bind_exec2 = BindExec2Message::new(false, false, bind_params);
         let bind_payload = bind_exec2.encode_payload();
-        eprintln!(
-            "DEBUG DML BIND_EXEC2(90): msg_auto_commit=false has_rs=false payload_len={} first48={:02?}",
-            bind_payload.len(),
-            &bind_payload[..bind_payload.len().min(48)]
-        );
         self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_payload))?;
 
         let rs = self.read_exec_response()?;
 
         // COMMIT if auto_commit
         if self.auto_commit {
-            eprintln!(
-                "DEBUG: do_execute_dml_with_params COMMIT after DML, sql={:?}, rs.total_row_count={}",
-                sql, rs.total_row_count
-            );
             self.do_commit()?;
-            eprintln!("DEBUG: COMMIT succeeded");
         }
 
-        eprintln!(
-            "DEBUG: do_execute_dml_with_params returning total_row_count={}",
-            rs.total_row_count
-        );
         Ok(rs.total_row_count)
     }
 
@@ -601,13 +584,6 @@ impl Client {
         self.write_all(&build_message(BIND_EXEC2, stmt_id, &bind_exec2.encode_payload()))?;
 
         let rs = self.read_exec_response()?;
-        eprintln!(
-            "DEBUG: do_query_with_params result: sql={:?}, rows={}, columns={}, total_row_count={}",
-            sql,
-            rs.rows.len(),
-            rs.columns.len(),
-            rs.total_row_count
-        );
         Ok(rs)
     }
 
@@ -759,22 +735,32 @@ impl Client {
 
         let ready_frame = Frame::new(READY, 0, 0);
         self.write_all(&ready_frame.encode())?;
-        self.read_message()?;
+        self.read_message()?; // READY ack
 
         let exec = ExecMessage::new(sql, 0);
         let exec_payload = exec.encode_payload();
         self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec_payload))?;
 
-        // Parse the response to get actual affected row count
-        let rs = self.read_exec_response()?;
+        // OPE(91) for DML returns empty ACK. The actual result is queued
+        // and sent when we send the next READY (via COMMIT below).
+        let (frame, _payload) = self.read_message()?;
+        if frame.response_code < 0 {
+            return Err(Error::QueryFailed(format!(
+                "response_code={}", frame.response_code
+            )));
+        }
 
         // DM server doesn't auto-commit by default. When auto_commit is true,
         // send a COMMIT after each statement to match the expected behavior.
+        // The COMMIT's READY triggers the queued EXEC_RESPONSE with affected rows.
         if self.auto_commit {
-            self.do_commit()?;
+            // do_commit sends READY + COMMIT and reads the COMMIT response,
+            // which also flushes the queued EXEC_RESPONSE.
+            let affected = self.do_commit_with_affected()?;
+            Ok(affected)
+        } else {
+            Ok(0)
         }
-
-        Ok(rs.total_row_count)
     }
 
     /// Internal commit - sends the COMMIT protocol message.
@@ -798,7 +784,53 @@ impl Client {
         Ok(())
     }
 
+    /// Commit with affected rows - sends COMMIT and reads queued EXEC_RESPONSE first.
+    /// After OPE(91) DML, DM queues the EXEC_RESPONSE and sends it when we issue the
+    /// next READY (which COMMIT does internally).
+    fn do_commit_with_affected(&mut self) -> Result<u64> {
+        // Send READY to trigger the server to flush queued EXEC_RESPONSE
+        let ready_frame = Frame::new(READY, 0, 0);
+        self.write_all(&ready_frame.encode())?;
+
+        // Read queued EXEC_RESPONSE with affected rows
+        let (frame, payload) = self.read_message()?;
+        if frame.response_code < 0 {
+            return Err(Error::QueryFailed(format!(
+                "response_code={}", frame.response_code
+            )));
+        }
+
+        // Affected rows from frame header or payload
+        let affected = if frame.affected_rows > 0 {
+            frame.affected_rows as u64
+        } else if payload.len() >= 16 {
+            u32::from_le_bytes([payload[12], payload[13], payload[14], payload[15]]) as u64
+        } else {
+            0
+        };
+
+        // Now send actual COMMIT
+        let commit = CommitMessage;
+        let payload = commit.encode_payload();
+        self.write_all(&build_message(COMMIT, self.handle, &payload))?;
+
+        // Read COMMIT response
+        let (frame2, _p2) = self.read_message()?;
+        if frame2.response_code < 0 {
+            return Err(Error::ConnectionFailed(format!(
+                "COMMIT failed with resp_code={}",
+                frame2.response_code
+            )));
+        }
+
+        Ok(affected)
+    }
+
     /// Read an EXEC_RESPONSE and parse into Rows.
+    ///
+    /// For OPE(91) the server may send a sequence of messages:
+    ///   ACK(187) with data → ACK(187) empty → EXEC_RESPONSE(0) with data
+    /// We consume all of them and extract affected row count / result data.
     fn read_exec_response(&mut self) -> Result<ResultSet> {
         let (frame, payload) = self.read_message()?;
 
@@ -820,11 +852,39 @@ impl Client {
             return Err(Error::QueryFailed(error_detail));
         }
 
+        if frame.msg_type == ACK && payload.is_empty() {
+            // OPE(91) DML: empty ACK followed by EXEC_RESPONSE with actual data.
+            // Get affected rows from the EXEC_RESPONSE frame header.
+            let affected = self.consume_remaining_ope_messages()?;
+            return Ok(ResultSet::with_data(
+                Vec::new(),
+                Vec::new(),
+                0,
+                affected,
+            ));
+        }
+
         if frame.msg_type == ACK {
-            // OPE (type 91) returns ACK with inline row data in payload
-            if payload.is_empty() {
-                return Ok(ResultSet::new());
-            }
+            // OPE(91) returns ACK with inline row data in payload.
+            // After this, there may be more messages (empty ACK + EXEC_RESPONSE)
+            // that we need to consume to keep the connection in sync.
+            let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
+            // Consume any trailing messages from the OPE response sequence
+            let trailing = self.consume_remaining_ope_messages()?;
+            let total = if resp.row_count > 0 {
+                resp.row_count as u64
+            } else {
+                trailing
+            };
+            return Ok(ResultSet::with_data(
+                resp.columns,
+                resp.rows,
+                0,
+                total,
+            ));
+        }
+
+        if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
             let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
             return Ok(ResultSet::with_data(
                 resp.columns,
@@ -833,20 +893,126 @@ impl Client {
                 resp.row_count as u64,
             ));
         }
-        if frame.msg_type == EXEC_RESPONSE || frame.msg_type == 160 {
-            let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
-            Ok(ResultSet::with_data(
-                resp.columns,
-                resp.rows,
-                0,
-                resp.row_count as u64,
-            ))
-        } else {
-            Err(Error::ConnectionFailed(format!(
-                "unexpected response msg_type={}",
-                frame.msg_type
-            )))
+
+        Err(Error::ConnectionFailed(format!(
+            "unexpected response msg_type={}",
+            frame.msg_type
+        )))
+    }
+
+    /// Consume remaining messages after an OPE(91) response.
+    /// The server may send trailing ACK(empty) and/or EXEC_RESPONSE messages
+    /// that need to be consumed to keep the connection in sync.
+    /// Returns the affected row count from the frame header if found.
+    fn consume_remaining_ope_messages(&mut self) -> Result<u64> {
+        let mut affected = 0u64;
+
+        // Try to read one more message with a short timeout
+        if let Some(Ok((frame, payload))) =
+            self.try_read_message(std::time::Duration::from_millis(500))
+        {
+            if frame.response_code < 0 {
+                return Err(Error::QueryFailed(format!(
+                    "response_code={}", frame.response_code
+                )));
+            }
+            // If we got an empty ACK, try one more (EXEC_RESPONSE with affected rows in frame header)
+            if frame.msg_type == ACK && payload.is_empty() {
+                if let Some(Ok((f3, _p3))) =
+                    self.try_read_message(std::time::Duration::from_millis(500))
+                {
+                    if f3.response_code < 0 {
+                        return Err(Error::QueryFailed(format!(
+                            "response_code={}", f3.response_code
+                        )));
+                    }
+                    // Affected rows in frame header offset 14-17
+                    affected = f3.affected_rows as u64;
+                }
+            }
+            // Also check if this message itself has affected rows in frame header
+            if frame.msg_type == EXEC_RESPONSE {
+                affected = frame.affected_rows as u64;
+            }
         }
+
+        Ok(affected)
+    }
+
+    /// Try to read a single message with a timeout.
+    /// Returns None if no message is available within the timeout,
+    /// Some(Ok(...)) on success, Some(Err(...)) on error.
+    fn try_read_message(&mut self, timeout: std::time::Duration) -> Option<Result<(Frame, Vec<u8>)>> {
+        use std::io::ErrorKind;
+
+        let stream = self.stream.as_mut()?;
+
+        // Set temporary timeout
+        let _ = stream.set_read_timeout(Some(timeout));
+
+        let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + 4096);
+
+        // Read frame header
+        loop {
+            if buf.len() >= FRAME_HEADER_SIZE {
+                break;
+            }
+            let mut tmp = vec![0u8; 1024];
+            match stream.read(&mut tmp) {
+                Ok(0) => {
+                    let _ = stream.set_read_timeout(None);
+                    return None;
+                }
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
+                    let _ = stream.set_read_timeout(None);
+                    return None;
+                }
+                Err(e) => {
+                    let _ = stream.set_read_timeout(None);
+                    return Some(Err(Error::Io(e)));
+                }
+            }
+        }
+
+        let frame = match Frame::parse(&mut buf) {
+            Ok(f) => f,
+            Err(_) => {
+                let _ = stream.set_read_timeout(None);
+                return None;
+            }
+        };
+
+        // Restore timeout
+        let _ = stream.set_read_timeout(None);
+
+        // Read payload
+        let body_len = frame.body_len.max(0) as usize;
+        while buf.len() < body_len {
+            let mut tmp = vec![0u8; 1024];
+            let n = loop {
+                match stream.read(&mut tmp) {
+                    Ok(n) => break n,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(e) => return Some(Err(Error::Io(e))),
+                }
+            };
+            if n == 0 {
+                return Some(Err(Error::ConnectionFailed(
+                    "connection closed during payload read".to_string(),
+                )));
+            }
+            buf.extend_from_slice(&tmp[..n]);
+        }
+
+        let payload = buf[..body_len].to_vec();
+
+        Some(Ok((frame, payload)))
     }
 
     /// Execute a SQL SELECT query and return the result set.
