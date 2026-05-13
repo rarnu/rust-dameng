@@ -921,7 +921,13 @@ impl Client {
             // For SELECT queries this is the complete response — no trailing messages.
             // For DML queries there may be trailing messages, handled after parsing.
             let resp = ExecResponse::from_bytes(&payload, self.server_encoding)?;
-            let mut total = resp.row_count as u64;
+            let mut total = if resp.row_count > 0 {
+                resp.row_count as u64
+            } else {
+                // DM server doesn't fill header row_count for OPE(91) SELECT responses,
+                // so derive it from the actual inline row data.
+                resp.rows.len() as u64
+            };
             if !has_result_set {
                 // DML with trailing messages (rare path)
                 let trailing = self.consume_remaining_ope_messages()?;
