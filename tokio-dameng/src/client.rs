@@ -208,7 +208,7 @@ impl Client {
             handle: 0,
             challenge: vec![],
             auto_commit: true,
-            server_encoding: ServerEncoding::Utf8,
+            server_encoding: ServerEncoding::Gb18030,
             new_lob_flag: false,
             isolation_level: dameng_protocol::message::isolation::IsolationLevel::ReadCommitted,
         }
@@ -317,7 +317,7 @@ impl Client {
 
     async fn read_login_response(&mut self) -> Result<LoginResponse> {
         let (frame, payload) = self.read_message().await?;
-        if frame.msg_type != LOGIN_RESPONSE {
+        if frame.msg_type != LOGIN_RESPONSE && frame.msg_type != ACK {
             return Err(Error::ConnectionFailed(format!(
                 "expected LOGIN_RESPONSE got msg_type={}",
                 frame.msg_type

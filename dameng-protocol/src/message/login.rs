@@ -125,9 +125,10 @@ impl LoginResponse {
         let session_id = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
 
         let encoding = match data[0x0A] {
-            1 => 1u8,
-            2 => 2u8,
-            _ => 1u8,
+            0 => 0u8, // GB18030
+            1 => 1u8, // UTF-8
+            2 => 2u8, // EUC-KR
+            _ => 0u8, // default to GB18030 (matching DM Go driver)
         };
 
         let server_status = data[0x0E];

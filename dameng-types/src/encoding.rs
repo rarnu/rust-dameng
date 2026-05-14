@@ -23,15 +23,17 @@ pub enum ServerEncoding {
 impl ServerEncoding {
     /// Create from DM protocol encoding value.
     ///
-    /// # Arguments
-    /// * `value` - The encoding byte from LOGIN_RESPONSE (1=UTF-8, 2=GB18030)
+    /// Per DM Go driver (dm_build_425), the LOGIN_RESPONSE encoding field maps:
+    /// - 0: GB18030
+    /// - 1: UTF-8
+    /// - 2: EUC-KR
+    /// Defaults to GB18030 (matching DM Go driver behavior).
     pub fn from_protocol_value(value: u8) -> Self {
         match value {
-            2 => ServerEncoding::Gb18030,
-            _ => ServerEncoding::Utf8, // Default to UTF-8 for safety
+            1 => ServerEncoding::Utf8,
+            _ => ServerEncoding::Gb18030, // 0, 2, and default → GB18030
         }
     }
-
     /// Get the encoding_rs Encoding instance for this server encoding.
     pub fn encoding(&self) -> &'static Encoding {
         match self {
@@ -93,13 +95,13 @@ mod tests {
 
     #[test]
     fn test_from_protocol_value_gb18030() {
+        assert_eq!(ServerEncoding::from_protocol_value(0), ServerEncoding::Gb18030);
         assert_eq!(ServerEncoding::from_protocol_value(2), ServerEncoding::Gb18030);
     }
 
     #[test]
     fn test_from_protocol_value_default() {
-        assert_eq!(ServerEncoding::from_protocol_value(0), ServerEncoding::Utf8);
-        assert_eq!(ServerEncoding::from_protocol_value(255), ServerEncoding::Utf8);
+        assert_eq!(ServerEncoding::from_protocol_value(255), ServerEncoding::Gb18030);
     }
 
     #[test]

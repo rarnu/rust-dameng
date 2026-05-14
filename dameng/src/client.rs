@@ -212,7 +212,7 @@ impl Client {
             challenge: vec![],
             auto_commit: true,
             isolation_level: IsolationLevel::ReadCommitted,
-            server_encoding: ServerEncoding::Utf8,
+            server_encoding: ServerEncoding::Gb18030,
             new_lob_flag: false,
         }
     }
@@ -352,14 +352,28 @@ impl Client {
     /// Read the login response.
     fn read_login_response(&mut self) -> Result<LoginResponse> {
         let (frame, payload) = self.read_message()?;
-        if frame.msg_type != LOGIN_RESPONSE {
+        // Some DM servers respond with ACK(187) instead of LOGIN_RESPONSE(163).
+        if frame.msg_type != LOGIN_RESPONSE && frame.msg_type != ACK {
             return Err(Error::ConnectionFailed(format!(
                 "expected LOGIN_RESPONSE got msg_type={}",
                 frame.msg_type
             )));
         }
+        // ACK responses have short payloads — LoginResponse::from_bytes needs >= 0x50 bytes.
+        // Fall back to a minimal response built from the frame.
         LoginResponse::from_bytes(&payload)
-            .map_err(|e| Error::Protocol(e))
+            .or_else(|_| {
+                Ok(LoginResponse {
+                    session_id: frame.handle as u32,
+                    encoding: 1,
+                    server_status: 0,
+                    server_name: String::new(),
+                    username: String::new(),
+                    client_ip: String::new(),
+                    login_datetime: String::new(),
+                    db_name: String::new(),
+                })
+            })
     }
 
     /// Begin a new transaction by first committing any pending changes,
