@@ -1,28 +1,90 @@
-# Rust Dameng Database Driver
+# dameng
 
-纯 Rust 实现的达梦数据库 (DM) 驱动，支持同步和异步 (tokio) 两种模式。
+[![Crates.io](https://img.shields.io/crates/v/dameng.svg)](https://crates.io/crates/dameng)
+[![Docs.rs](https://docs.rs/dameng/badge.svg)](https://docs.rs/dameng)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-## 项目结构
+A pure-Rust, `postgres`-compatible driver for [Dameng Database](https://www.dameng.com/) (DM8).
 
-```
-rust-dameng/
-├── dameng-protocol/    # 协议层实现 (消息编码/解码)
-├── dameng-types/       # 类型定义和编解码 (DmValue, DmValueType)
-├── dameng/             # 同步客户端 (类似 postgres)
-├── tokio-dameng/       # 异步客户端 (类似 tokio-postgres)
-├── dameng-macros/      # 过程宏 (FromRow derive + query! macros)
-├── integration-test/   # 集成测试
-└── examples/           # 使用示例
-```
+> [中文文档 (Chinese)](README_CN.md)
 
-## 快速开始
+## Features
 
-### 同步客户端
+- **Pure-Rust protocol** — full DM8 binary wire protocol (STARTUP, LOGIN, EXEC, OPE, FETCH, COMMIT, ROLLBACK)
+- **SQLx-style parameter binding** — `&[&id, &name]` with automatic type conversion
+- **Transaction support** — `Transaction` API with automatic rollback on `Drop`
+- **Rich type system** — INT, BIGINT, VARCHAR, FLOAT, DOUBLE, DECIMAL, DATE, TIME, TIMESTAMP, BLOB, CLOB, and more
+- **Safe** — parameterized queries prevent SQL injection
+- **TLS support** — optional SSL/TLS encrypted connections
+
+## Installation
 
 ```toml
 [dependencies]
-dameng = { path = "dameng" }
+dameng = "0.1"
 ```
+
+## Quick Start
+
+### Connect
+
+```rust
+use dameng::Client;
+
+let mut client = Client::new("127.0.0.1", 5236);
+client.connect("SYSDBA", "SYSDBA")?;
+```
+
+### Query
+
+```rust
+let rs = client.query("SELECT ID, NAME FROM PERSON")?;
+for row in rs.iter() {
+    let id: i32 = row.get(0).unwrap_or_default();
+    let name = row.get_str(1).unwrap_or("<NULL>");
+    println!("ID={}, NAME={}", id, name);
+}
+```
+
+### Parameterized Queries (SQLx style)
+
+```rust
+let id: i32 = 1;
+let name: &str = "Alice";
+let rs = client.query_with_params(
+    "SELECT * FROM PERSON WHERE ID = ? AND NAME = ?",
+    &[&id, &name],
+)?;
+```
+
+### DML (INSERT / UPDATE / DELETE)
+
+```rust
+let affected = client.execute_with_params(
+    "INSERT INTO PERSON (ID, NAME, AGE) VALUES (?, ?, ?)",
+    &[&1, &"Alice", &25],
+)?;
+println!("Inserted {} rows", affected);
+```
+
+### Transactions
+
+```rust
+let mut tx = client.transaction()?;
+
+tx.execute_with_params("INSERT INTO PERSON VALUES (?, ?)", &[&1, &"Alice"])?;
+tx.execute_with_params("INSERT INTO PERSON VALUES (?, ?)", &[&2, &"Bob"])?;
+
+// Commit — tx is consumed, Client borrow is released
+tx.commit()?;
+
+// Client is immediately available for reuse
+client.close()?;
+```
+
+All operations within a transaction execute as an atomic unit. If a `Transaction` is dropped without an explicit `commit()` or `rollback()`, a `ROLLBACK` is sent automatically.
+
+### Full CRUD Example
 
 ```rust
 use dameng::Client;
@@ -31,146 +93,198 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut client = Client::new("127.0.0.1", 5236);
     client.connect("SYSDBA", "SYSDBA")?;
 
-    let rs = client.query("SELECT 1")?;
-    for row in &rs.rows {
-        if let Ok(val) = row.get_i32(0) {
-            println!("Result: {}", val);
-        }
+    // CREATE
+    client.execute("CREATE TABLE IF NOT EXISTS users (
+        id INT PRIMARY KEY,
+        name VARCHAR(100),
+        age INT
+    )")?;
+
+    // INSERT — batch insert in a transaction
+    let mut tx = client.transaction()?;
+    let users = [(1, "Alice", 25i32), (2, "Bob", 30), (3, "Carol", 28)];
+    for (id, name, age) in &users {
+        tx.execute_with_params(
+            "INSERT INTO users VALUES (?, ?, ?)",
+            &[&id, &name, &age],
+        )?;
     }
-    Ok(())
-}
-```
+    tx.commit()?;
 
-### 异步客户端 (tokio)
-
-```toml
-[dependencies]
-tokio-dameng = { path = "tokio-dameng" }
-tokio = { version = "1", features = ["full"] }
-```
-
-```rust
-use tokio_dameng::Client;
-use tokio_dameng::QueryBuilderExt;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = Client::new("127.0.0.1", 5236);
-    client.connect("SYSDBA", "SYSDBA").await?;
-
-    let rs = client.query("SELECT 1").await?;
-    for row in &rs.rows {
-        if let Ok(val) = row.get_i32(0) {
-            println!("Result: {}", val);
-        }
+    // SELECT
+    let rs = client.query_with_params(
+        "SELECT name, age FROM users WHERE age > ? ORDER BY age",
+        &[&26i32],
+    )?;
+    for row in rs.iter() {
+        let name = row.get_str(0).unwrap_or("<NULL>");
+        let age: i32 = row.get(1).unwrap_or_default();
+        println!("{name}: {age}");
     }
 
-    // Query API (sqlx-like)
-    let rs = client.query("SELECT 42 AS ANS").fetch_all().await?;
-    println!("Rows: {}", rs.len());
+    // UPDATE
+    client.execute_with_params(
+        "UPDATE users SET age = ? WHERE id = ?",
+        &[&31i32, &1i32],
+    )?;
 
+    // DELETE
+    client.execute_with_params("DELETE FROM users WHERE id = ?", &[&3i32])?;
+
+    client.close()?;
     Ok(())
 }
 ```
 
-### 连接池
+## API Reference
+
+### Client
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `Client::new(host, port)` | `Client` | Create a new client |
+| `connect(username, password)` | `Result<()>` | Connect to the database |
+| `close()` | `Result<()>` | Close the connection |
+| `transaction()` | `Result<Transaction>` | Begin a new transaction |
+| `execute(sql)` | `Result<u64>` | Execute DML, returns affected rows |
+| `execute_with_params(sql, params)` | `Result<u64>` | Execute DML with parameters |
+| `query(sql)` | `Result<ResultSet>` | Execute a SELECT query |
+| `query_with_params(sql, params)` | `Result<ResultSet>` | Execute a SELECT query with parameters |
+| `begin()` | `Result<()>` | Disable auto-commit (low-level) |
+
+### Transaction
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `commit(self)` | `Result<()>` | Commit and consume the transaction, releasing the Client |
+| `rollback(self)` | `Result<()>` | Rollback and consume the transaction, releasing the Client |
+| `execute(sql)` | `Result<u64>` | DML within the transaction |
+| `execute_with_params(sql, params)` | `Result<u64>` | DML with parameters within the transaction |
+| `query(sql)` | `Result<ResultSet>` | SELECT within the transaction |
+| `query_with_params(sql, params)` | `Result<ResultSet>` | SELECT with parameters within the transaction |
+
+### ResultSet
+
+| Method / Field | Description |
+|----------------|-------------|
+| `iter()` | Returns an iterator over the rows |
+| `columns` | Column metadata: `Vec<Column>` |
+| `rows` | Row data: `Vec<Row>` |
+| `total_row_count` | Total row count reported by the server |
+
+### QueryRow
+
+| Method | Description |
+|--------|-------------|
+| `get::<T>(idx)` | Get a column value by type (recommended) |
+| `get_i32(idx)` / `get_i64(idx)` | Get an integer value |
+| `get_str(idx)` | Get a string value |
+| `get_f64(idx)` | Get a float value |
+| `get_opt_str(idx)` | Get an optional string (NULL-safe) |
+
+## Type Mapping
+
+| Rust Type | DM Type | `ToDmValue` |
+|-----------|---------|-------------|
+| `i8` | TINYINT | `DmValue::TinyInt` |
+| `i16` | SMALLINT | `DmValue::SmallInt` |
+| `i32` | INT | `DmValue::Int` |
+| `i64` | BIGINT | `DmValue::BigInt` |
+| `f32` | FLOAT | `DmValue::Float` |
+| `f64` | DOUBLE | `DmValue::Double` |
+| `bool` | BIT | `DmValue::Boolean` |
+| `&str` / `String` | VARCHAR | `DmValue::Text` |
+| `Vec<u8>` | VARBINARY | `DmValue::Bytea` |
+| `rust_decimal::Decimal` | DECIMAL | — |
+| `chrono::NaiveDate` | DATE | — |
+| `chrono::NaiveDateTime` | TIMESTAMP | — |
+
+## Connection Configuration
 
 ```rust
-use tokio_dameng::{Pool, PoolConfig};
+use dameng::{Client, ConnectOptions, IsolationLevel};
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let pool = Pool::new("127.0.0.1", 5236, "SYSDBA", "SYSDBA", PoolConfig::default());
+// Via DSN
+let opts = ConnectOptions::from_dsn(
+    "dm://SYSDBA:SYSDBA@127.0.0.1:5236/?auto_commit=false&isolation_level=serializable"
+)?;
+let mut client = Client::connect_with(&opts)?;
 
-    // Checkout a connection from the pool
-    let mut conn = pool.get().await?;
-    let rs = conn.query("SELECT 1").await?;
-    drop(conn); // Auto-return to pool
-
-    Ok(())
-}
+// Or manually
+let mut client = Client::new("127.0.0.1", 5236);
+client.auto_commit = false;
+client.isolation_level = IsolationLevel::Serializable;
+client.connect("SYSDBA", "SYSDBA")?;
 ```
 
-### SQLx-compatible 宏
+## Project Structure
 
-```rust
-use tokio_dameng::sqlx::{FromRow, QueryAs};
-
-#[derive(FromRow)]
-struct User {
-    id: i32,
-    name: String,
-}
-
-let users: Vec<User> = QueryAs::new("SELECT id, name FROM users")
-    .fetch_all(&mut client).await?;
 ```
-
-## 功能特性
-
-- **协议解析**: 完整实现达梦数据库二进制协议 (STARTUP/LOGIN/EXEC/FETCH/COMMIT/ROLLBACK等)
-- **同步客户端**: 基于标准 TcpStream 的同步连接
-- **异步客户端**: 基于 tokio 的异步连接
-- **连接池**: Semaphore + Mutex 实现的轻量级异步连接池 (自动归还 + 健康检查)
-- **ResultSet**: 统一的查询结果集，包含列元数据和行数据
-- **类型编解码**: INT, BIGINT, SMALLINT, TINYINT, VARCHAR, CHAR, FLOAT, DOUBLE, BIT, BLOB, DECIMAL, DATE, TIME, TIMESTAMP 等类型支持
-- **事务支持**: BEGIN/COMMIT/ROLLBACK + auto-commit 自动提交
-- **SQLx 兼容层**: `#[derive(FromRow)]` + `Query`/`QueryAs`/`QueryScalar` + `dameng_query!`/`dameng_query_as!`/`dameng_query_scalar!` 宏
-- **参数绑定**: 安全字符串插值 (INT/VARCHAR/TIMESTAMP/BLOB/NULL 等)
-
-## 示例列表
-
-| 示例 | 描述 |
-|------|------|
-| `basic_query` | 同步客户端基础查询 |
-| `async_query` | 异步客户端 + Query API |
-| `crud` | 完整 CRUD + 事务 (BEGIN/COMMIT/ROLLBACK) |
-| `parameter_binding` | INT/VARCHAR/TIMESTAMP 参数绑定 (INSERT/UPDATE/DELETE/SELECT) |
-| `join_queries` | LEFT JOIN / 三表 JOIN / 聚合 / 子查询 / EXISTS |
-| `data_types` | INT/VARCHAR/TIMESTAMP/NULL/COUNT/复合主键类型覆盖 |
-| `real_param_binding` | 真正的 execute_with_params 参数绑定 (INT/VARCHAR/TIMESTAMP) |
-
-## 运行示例
-
-```bash
-# 设置环境变量
-export DM_HOST=127.0.0.1
-export DM_PORT=5236
-export DM_USER=SYSDBA
-export DM_PASS=SYSDBA
-
-# 运行示例
-cargo run --package dameng --example basic_query
-cargo run --package dameng --example async_query
-cargo run --package dameng --example crud
-cargo run --package dameng --example parameter_binding
-cargo run --package dameng --example join_queries
-cargo run --package dameng --example data_types
-cargo run --package dameng --example real_param_binding
+rust-dameng/
+├── dameng/             # Sync driver (main crate)
+├── dameng-protocol/    # Wire protocol (message encode/decode + frame format)
+├── dameng-types/       # Type system (DmValue + ToDmValue + encoding)
+├── tokio-dameng/       # Async driver (in development)
+├── dameng-macros/      # Procedural macros (in development)
+├── integration-test/   # Integration tests
+└── examples/           # Usage examples
 ```
-
-## 运行测试
-
-```bash
-# 单元测试 (不需要数据库连接)
-cargo test --workspace
-
-# 集成测试 (需要连接到达梦数据库)
-cargo run --package dm-integration-test --bin dm-integration-test
-```
-
-## 协议细节
-
-协议层基于达梦数据库 8.1.3.62 版本逆向工程实现:
-- 帧格式: 64字节头 + 变长载荷
-- 消息类型: STARTUP(200), LOGIN(1), READY(3), EXEC(5), OPTIMIZED_PREPARE_EXEC(91), FETCH(7), COMMIT(8), ROLLBACK(9), BIND(13), BIND_EXEC2(90), CLOSE(20), ACK(187) 等
-- 加密: XOR 基于服务端 challenge 的简单加密
-
-## 测试统计
-
-- 单元测试: 137 tests passing (dameng-protocol: 90, dameng: 12, tokio-dameng: 26, dameng-macros: 9)
-- 集成测试: 19 tests passing (sync CRUD, async CRUD, param binding, transactions)
 
 ## License
 
 MIT
+
+---
+
+## Publishing to crates.io
+
+This is a workspace with multiple sub-crates. Publish them in dependency order:
+
+### 1. Update Cargo.toml metadata
+
+Each sub-crate needs `repository`, `keywords`, `categories`, `readme`, and dependencies should use version numbers instead of paths:
+
+```toml
+[package]
+repository = "https://github.com/yourname/rust-dameng-ex"
+documentation = "https://docs.rs/dameng"
+readme = "../README.md"
+keywords = ["dameng", "database", "sql", "dm8"]
+categories = ["database"]
+
+[dependencies]
+# Use version instead of path for publishing
+dameng-protocol = "0.1"
+dameng-types = "0.1"
+```
+
+Files to update: `dameng-types/Cargo.toml`, `dameng-protocol/Cargo.toml`, `dameng/Cargo.toml`.
+
+### 2. Publish in order
+
+```bash
+# Login
+cargo login <your-api-token>
+
+# Dry-run checks
+cargo publish --dry-run -p dameng-types
+cargo publish --dry-run -p dameng-protocol
+cargo publish --dry-run -p dameng
+
+# Publish (no external deps first)
+cargo publish -p dameng-types
+cargo publish -p dameng-protocol
+cargo publish -p dameng
+```
+
+### 3. Version management
+
+- Use `0.1.0` as the initial version; bump to `1.0.0` once the API stabilizes
+- Published versions cannot be deleted — use `cargo yank` to deprecate
+- Always run `cargo publish --dry-run` before publishing
+
+### 4. Get your API token
+
+1. Sign in to [crates.io](https://crates.io) with GitHub
+2. Go to Account Settings → API Tokens → New Token
+3. Run `cargo login` and paste the token
