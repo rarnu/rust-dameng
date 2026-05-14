@@ -10,9 +10,9 @@ categories = ["database"]
 readme = "../README.md"
 
 [dependencies]
-dameng-protocol = "0.1.0"
-dameng-types = "0.1.0"
-dameng-macros = "0.1.0"
+dameng-protocol = { version = "0.1.0", path = "../dameng-protocol" }
+dameng-types = { version = "0.1.0", path = "../dameng-types" }
+dameng-macros = { version = "0.1.0", path = "../dameng-macros" }
 bytes = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-native-tls = "0.3"

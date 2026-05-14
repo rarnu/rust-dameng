@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "dameng-protocol",
     "dameng-types",
+    "dameng",
+    "tokio-dameng",
+    "dameng-macros"
 ]

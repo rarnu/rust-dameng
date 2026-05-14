@@ -11,6 +11,6 @@ readme = "../README.md"
 
 [dependencies]
 bytes = "1"
-dameng-types = "0.1.0"
+dameng-types = { version = "0.1.0", path = "../dameng-types" }
 
 [dev-dependencies]
