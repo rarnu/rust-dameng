@@ -21,7 +21,7 @@ A pure-Rust driver for [Dameng Database](https://www.dameng.com/) (DM8).
 
 ```toml
 [dependencies]
-dameng = "0.1"
+dameng = "0.1.0"
 ```
 
 ## Quick Start
@@ -38,11 +38,12 @@ client.connect("SYSDBA", "SYSDBA")?;
 ### Query
 
 ```rust
-let rs = client.query("SELECT ID, NAME FROM PERSON")?;
+let rs = client.query("SELECT ID, NAME, ADDRESS FROM PERSON")?;
 for row in rs.iter() {
-    let id: i32 = row.get(0).unwrap_or_default();
-    let name = row.get_str(1).unwrap_or("<NULL>");
-    println!("ID={}, NAME={}", id, name);
+    let id: i32 = row.get(0)?;
+    let name: &str = row.get(1)?;
+    let address: Option<&str> = row.get(2)?;
+    println!("ID={}, NAME={}, ADDRESS={:?}", id, name, address);
 }
 ```
 
@@ -75,11 +76,7 @@ let mut tx = client.transaction()?;
 tx.execute_with_params("INSERT INTO PERSON VALUES (?, ?)", &[&1, &"Alice"])?;
 tx.execute_with_params("INSERT INTO PERSON VALUES (?, ?)", &[&2, &"Bob"])?;
 
-// Commit — tx is consumed, Client borrow is released
 tx.commit()?;
-
-// Client is immediately available for reuse
-client.close()?;
 ```
 
 All operations within a transaction execute as an atomic unit. If a `Transaction` is dropped without an explicit `commit()` or `rollback()`, a `ROLLBACK` is sent automatically.
@@ -217,74 +214,6 @@ client.isolation_level = IsolationLevel::Serializable;
 client.connect("SYSDBA", "SYSDBA")?;
 ```
 
-## Project Structure
-
-```
-rust-dameng/
-├── dameng/             # Sync driver (main crate)
-├── dameng-protocol/    # Wire protocol (message encode/decode + frame format)
-├── dameng-types/       # Type system (DmValue + ToDmValue + encoding)
-├── tokio-dameng/       # Async driver (in development)
-├── dameng-macros/      # Procedural macros (in development)
-├── integration-test/   # Integration tests
-└── examples/           # Usage examples
-```
-
 ## License
 
 MIT
-
----
-
-## Publishing to crates.io
-
-This is a workspace with multiple sub-crates. Publish them in dependency order:
-
-### 1. Update Cargo.toml metadata
-
-Each sub-crate needs `repository`, `keywords`, `categories`, `readme`, and dependencies should use version numbers instead of paths:
-
-```toml
-[package]
-repository = "https://github.com/yourname/rust-dameng-ex"
-documentation = "https://docs.rs/dameng"
-readme = "../README.md"
-keywords = ["dameng", "database", "sql", "dm8"]
-categories = ["database"]
-
-[dependencies]
-# Use version instead of path for publishing
-dameng-protocol = "0.1"
-dameng-types = "0.1"
-```
-
-Files to update: `dameng-types/Cargo.toml`, `dameng-protocol/Cargo.toml`, `dameng/Cargo.toml`.
-
-### 2. Publish in order
-
-```bash
-# Login
-cargo login <your-api-token>
-
-# Dry-run checks
-cargo publish --dry-run -p dameng-types
-cargo publish --dry-run -p dameng-protocol
-cargo publish --dry-run -p dameng
-
-# Publish (no external deps first)
-cargo publish -p dameng-types
-cargo publish -p dameng-protocol
-cargo publish -p dameng
-```
-
-### 3. Version management
-
-- Use `0.1.0` as the initial version; bump to `1.0.0` once the API stabilizes
-- Published versions cannot be deleted — use `cargo yank` to deprecate
-- Always run `cargo publish --dry-run` before publishing
-
-### 4. Get your API token
-
-1. Sign in to [crates.io](https://crates.io) with GitHub
-2. Go to Account Settings → API Tokens → New Token
-3. Run `cargo login` and paste the token

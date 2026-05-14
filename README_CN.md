@@ -21,7 +21,7 @@
 
 ```toml
 [dependencies]
-dameng = "0.1"
+dameng = "0.1.0"
 ```
 
 ## 快速开始
@@ -38,11 +38,12 @@ client.connect("SYSDBA", "SYSDBA")?;
 ### 基础查询
 
 ```rust
-let rs = client.query("SELECT ID, NAME FROM PERSON")?;
+let rs = client.query("SELECT ID, NAME, ADDRESS FROM PERSON")?;
 for row in rs.iter() {
-    let id: i32 = row.get(0).unwrap_or_default();
-    let name = row.get_str(1).unwrap_or("<NULL>");
-    println!("ID={}, NAME={}", id, name);
+let id: i32 = row.get(0)?;
+let name: &str = row.get(1)?;
+let address: Option<&str> = row.get(2)?;
+println!("ID={}, NAME={}, ADDRESS={:?}", id, name, address);
 }
 ```
 
@@ -75,11 +76,7 @@ let mut tx = client.transaction()?;
 tx.execute_with_params("INSERT INTO PERSON VALUES (?, ?)", &[&1, &"Alice"])?;
 tx.execute_with_params("INSERT INTO PERSON VALUES (?, ?)", &[&2, &"Bob"])?;
 
-// 提交 — tx 被消费，Client 借出释放
 tx.commit()?;
-
-// Client 可立即继续使用
-client.close()?;
 ```
 
 事务内的所有操作作为一个原子单元执行。如果 `Transaction` 被 `Drop` 而未显式 `commit()` / `rollback()`，会自动执行 `ROLLBACK`。
@@ -217,73 +214,6 @@ client.isolation_level = IsolationLevel::Serializable;
 client.connect("SYSDBA", "SYSDBA")?;
 ```
 
-## 项目结构
-
-```
-rust-dameng/
-├── dameng/             # 同步驱动（主 crate）
-├── dameng-protocol/    # 协议层（消息编解码 + 帧格式）
-├── dameng-types/       # 类型系统（DmValue + ToDmValue + 编解码）
-├── tokio-dameng/       # 异步驱动（开发中）
-├── dameng-macros/      # 过程宏（开发中）
-├── integration-test/   # 集成测试
-└── examples/           # 使用示例
-```
-
 ## License
 
 MIT
-
----
-
-## 发布到 crates.io
-
-此项目为 workspace，包含多个子 crate，需按依赖顺序逐个发布：
-
-### 1. 准备 Cargo.toml
-
-每个子 crate 需要补充以下元数据，并将 `path = "..."` 改为 `version = "0.1"`：
-
-```toml
-[package]
-repository = "https://github.com/yourname/rust-dameng-ex"
-documentation = "https://docs.rs/dameng"
-readme = "../README.md"
-keywords = ["dameng", "database", "sql", "dm8"]
-categories = ["database"]
-
-[dependencies]
-dameng-protocol = "0.1"
-dameng-types = "0.1"
-```
-
-需要修改的文件：`dameng-types/Cargo.toml`、`dameng-protocol/Cargo.toml`、`dameng/Cargo.toml`。
-
-### 2. 按依赖顺序发布
-
-```bash
-# 登录
-cargo login <your-api-token>
-
-# 干跑检查
-cargo publish --dry-run -p dameng-types
-cargo publish --dry-run -p dameng-protocol
-cargo publish --dry-run -p dameng
-
-# 按依赖顺序发布
-cargo publish -p dameng-types
-cargo publish -p dameng-protocol
-cargo publish -p dameng
-```
-
-### 3. 版本管理
-
-- 建议初始版本使用 `0.1.0`，API 稳定后发布 `1.0.0`
-- 发布后不可删除，只能发布新版本（`cargo yank` 可以标记为废弃）
-- 发布前务必运行 `cargo publish --dry-run` 检查
-
-### 4. 获取 API Token
-
-1. 登录 [crates.io](https://crates.io)，用 GitHub 账号注册
-2. 进入 Account Settings → API Tokens → New Token
-3. 运行 `cargo login` 粘贴 token
