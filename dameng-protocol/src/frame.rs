@@ -41,6 +41,9 @@ pub struct Frame {
     /// Update count for DML operations, stored in the reserved area
     /// at header offset 24 (int64 LE). Always 0 for non-DML.
     pub update_count: u64,
+    /// Server encoding from header offset 28 (int32 LE).
+    /// Used in STARTUP_RESPONSE. 0=GB18030, 1=UTF-8, 2=EUC-KR.
+    pub server_encoding: u8,
 }
 
 impl Frame {
@@ -54,6 +57,7 @@ impl Frame {
             affected_rows: 0,
             compress_flag: 0,
             update_count: 0,
+            server_encoding: 0,
         }
     }
 
@@ -97,6 +101,13 @@ impl Frame {
         } else {
             0
         };
+        // Server encoding at header offset 28 (int32 LE)
+        let server_encoding = if buf.remaining() >= 12 {
+            let raw = &buf.chunk()[8..12]; // offset 28-31 in absolute header
+            u8::from_le_bytes([raw[0]])
+        } else {
+            0
+        };
 
         // Skip remaining 44 bytes of reserved
         buf.advance(44);
@@ -109,6 +120,7 @@ impl Frame {
             affected_rows,
             compress_flag,
             update_count,
+            server_encoding,
         })
     }
 

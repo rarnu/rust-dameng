@@ -5,6 +5,7 @@ target/
 .vscode/
 .DS_Store
 dm_go/
+dm_java/
 AGENT.md
 DESIGN.md
 

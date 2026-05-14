@@ -9,7 +9,15 @@ use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
 use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
 use dameng_protocol::message::bind::BindParam;
-use dameng_types::encoding::ServerEncoding;
+use dameng_types::encoding::{ServerEncoding, decode_from_server};
+
+/// Decode a server error message, trying UTF-8 first, then server encoding.
+fn decode_error_msg(server_encoding: ServerEncoding, bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    decode_from_server(server_encoding, bytes)
+}
 
 use crate::error::{Error, Result};
 use crate::row::ResultSet;
@@ -618,7 +626,16 @@ impl Client {
                 &exec.encode_payload(),
             ))?;
 
-            let rs = self.read_exec_response(has_result_set)?;
+            let rs = match self.read_exec_response(has_result_set) {
+                Ok(r) => r,
+                Err(e) => {
+                    // On DML error, send ROLLBACK to clean up connection state
+                    if !has_result_set {
+                        let _ = self.rollback();
+                    }
+                    return Err(e);
+                }
+            };
 
             if self.auto_commit && !has_result_set {
                 self.do_commit()?;
@@ -764,7 +781,7 @@ impl Client {
         self.write_all(&frame)?;
         let (frame, payload) = self.read_message()?;
         if frame.response_code < 0 {
-            let msg = String::from_utf8_lossy(&payload);
+            let msg = decode_error_msg(self.server_encoding, &payload);
             return Err(Error::QueryFailed(format!(
                 "set isolation failed: code={} type={} payload={}",
                 frame.response_code, frame.msg_type, msg
@@ -923,7 +940,7 @@ impl Client {
                     payload.get(15).copied().unwrap_or(0),
                 ]) as usize;
                 if msg_len > 0 && payload.len() >= 16 + msg_len {
-                    let msg = String::from_utf8_lossy(&payload[16..16 + msg_len]);
+                    let msg = decode_error_msg(self.server_encoding, &payload[16..16 + msg_len]);
                     error_detail = format!("{}: {}", frame.response_code, msg);
                 }
             }
