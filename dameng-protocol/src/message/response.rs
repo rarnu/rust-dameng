@@ -482,11 +482,11 @@ impl ExecResponse {
         let table_name_len = u16::from_le_bytes([data[28], data[29]]) as usize;
         let schema_name_len = u16::from_le_bytes([data[30], data[31]]) as usize;
 
-        let mut columns = Vec::with_capacity(col_count as usize);
+        let mut columns = Vec::with_capacity(col_count.max(1) as usize);
         let mut offset = 32; // Column variable data starts at 32
 
         // When col_count > 0, parse first column from the compact 16-byte header.
-        // When col_count == 0 (BIND_EXEC2 path), all columns use the expanded 32-byte
+        // When col_count == 0 (BIND_EXEC2 path), ALL columns use the expanded 32-byte
         // format starting at offset 16 — skip the compact header parsing entirely.
         if col_count > 0 {
             // col_name (explicit length from col_name_len field at offset 24-25)
@@ -544,6 +544,7 @@ impl ExecResponse {
                 lob_col_id: 0,
             });
         }
+
         // === Subsequent Columns ===
         // For sub_type=7 (full SELECT), OPE(91) may report col_count=1 even for
         // multi-column queries. Parse columns dynamically until we hit row data.
@@ -568,7 +569,17 @@ impl ExecResponse {
         //  30   u16  schema_name_len
         //  32   [col_name][type_name][table_name][schema_name] (no null terminator)
         let use_dynamic = sub_type == 7 && col_count > 0;
-        let max_cols = if use_dynamic { 32 } else { col_count as usize };
+        // When col_count == 0 (BIND_EXEC2 SELECT path), all columns use the
+        // expanded 32-byte format starting at offset 16 (no compact first-column header).
+        // We reuse the dynamic parser logic with col_count as the parsed count.
+        let max_cols = if use_dynamic { 32 } else { (col_count as usize).max(columns.len()) };
+        let mut parsed_cols = columns.len() as usize;
+        // For BIND_EXEC2 (col_count == 0), start parsing at offset 16 (right after header),
+        // reusing the expanded column parser loop below.
+        if col_count == 0 {
+            parsed_cols = 0;
+            offset = 16;
+        }
         let mut parsed_cols = 1;
         while parsed_cols < max_cols {
             // Save position before attempting to parse next column.

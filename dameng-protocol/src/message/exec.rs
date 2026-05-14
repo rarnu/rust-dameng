@@ -74,6 +74,9 @@ impl ExecMessage {
 /// 25      1     inner_exec (0/1)
 /// 26      N     SQL text (raw bytes + null terminator)
 /// ```
+///
+/// For MsgVersion >= 3 (default for DM 8.x), an extra byte follows the 26-byte
+/// header: the result-set-encoding byte. 0 = default row format.
 #[derive(Debug, Clone)]
 pub struct PrepareMessage {
     /// The SQL string to prepare.
@@ -82,6 +85,9 @@ pub struct PrepareMessage {
     pub has_result_set: bool,
     /// Auto-commit mode.
     pub auto_commit: bool,
+    /// DM protocol message version (defaults to 8 as of DM 8.x).
+    /// Controls whether the extra result-set-encoding byte is emitted.
+    pub msg_version: i32,
 }
 
 impl PrepareMessage {
@@ -91,20 +97,22 @@ impl PrepareMessage {
             sql: sql.to_string(),
             has_result_set,
             auto_commit: true,
+            msg_version: 8,
         }
     }
 
     /// Encode to payload bytes matching Go driver's EXEC(5) format.
     ///
-    /// Layout is the 26-byte exec params header + raw SQL bytes + null terminator.
+    /// Layout is the 27-byte exec params header (26 bytes + optional byte for
+    /// MsgVersion >= 3) + raw SQL bytes + null terminator.
     /// Matches Go dm_build_784.dm_build_421() implementation.
     pub fn encode_payload(&self) -> BytesMut {
         let mut buf = BytesMut::new();
 
         // 0: auto_commit
         buf.put_u8(if self.auto_commit { 1 } else { 0 });
-        // 1: is_prepare flag — 0 for prepare
-        buf.put_u8(0);
+        // 1: has_result_set (matches Go byte 1 — dm_build_785)
+        buf.put_u8(if self.has_result_set { 1 } else { 0 });
         // 2: reserved
         buf.put_u8(0);
         // 3: exec_flag = 1
@@ -119,8 +127,8 @@ impl PrepareMessage {
         buf.put_u8(0);
         // 16-17: reserved (i16 LE) = 0
         buf.put_i16_le(0);
-        // 18: bind_options = 0 (overwrites result_set_flag in Go driver)
-        buf.put_u8(0);
+        // 18: bind_options = 1 (Go driver writes 1 here — critical for BIND_EXEC2)
+        buf.put_u8(1);
         // 19: reserved
         buf.put_u8(0);
         // 20: reserved
@@ -129,6 +137,13 @@ impl PrepareMessage {
         buf.put_i32_le(0);
         // 25: inner_exec = 0
         buf.put_u8(0);
+
+        // Extra byte for MsgVersion >= 3 (Go driver Dm_build_783 / offset 38).
+        // Result-set encoding byte: 0 = default row format.
+        if self.msg_version >= 3 {
+            let rs_encoding: u8 = 0; // Dm_build_537 = 0x00
+            buf.put_u8(rs_encoding);
+        }
 
         // SQL text as raw bytes + null terminator (no length prefix)
         buf.put_slice(self.sql.as_bytes());

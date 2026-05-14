@@ -249,14 +249,14 @@ impl StatementAllocateMessage {
 
     /// Parse the statement ID from the response payload.
     pub fn parse_response(payload: &[u8]) -> Result<u32> {
-        if payload.len() < 24 {
+        if payload.len() < 4 {
             return Err(crate::error::Error::Incomplete);
         }
         let stmt_id = u32::from_le_bytes([
-            payload[20],
-            payload[21],
-            payload[22],
-            payload[23],
+            payload[0],
+            payload[1],
+            payload[2],
+            payload[3],
         ]);
         Ok(stmt_id)
     }

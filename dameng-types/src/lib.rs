@@ -553,6 +553,38 @@ impl_to_dm_value!(
     f64 => Double,
 );
 
+impl ToDmValue for u8 {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::TinyInt(*self as i8)
+    }
+}
+
+impl ToDmValue for u16 {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::SmallInt(*self as i16)
+    }
+}
+
+impl ToDmValue for u32 {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Int(*self as i32)
+    }
+}
+
+impl ToDmValue for u64 {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::BigInt(*self as i64)
+    }
+}
+
+// Blanket impl: `&T` where `T: ToDmValue` delegates to T.
+// This lets `&[&id, &name]` work when `name: &str` (producing `&&str`).
+impl<T: ToDmValue + ?Sized> ToDmValue for &T {
+    fn to_dm_value(&self) -> DmValue {
+        T::to_dm_value(*self)
+    }
+}
+
 impl ToDmValue for str {
     fn to_dm_value(&self) -> DmValue {
         DmValue::Text(self.to_string())

@@ -508,7 +508,77 @@ impl Client {
         self.do_prepare_execute(params, sql, has_result_set)
     }
 
-    /// Core execution: READY → EXEC(5) prepare → BIND_EXEC2 → read result.
+    /// Substitute ? placeholders with SQL literal values.
+    fn substitute_params(sql: &str, params: &[BindParam]) -> String {
+        let mut result = String::with_capacity(sql.len() + params.len() * 16);
+        let mut pi = 0;
+        for b in sql.bytes() {
+            if b == b'?' && pi < params.len() {
+                let lit = Self::bind_param_literal(&params[pi]);
+                result.push_str(&lit);
+                pi += 1;
+            } else {
+                result.push(b as char);
+            }
+        }
+        result
+    }
+
+    /// Convert a BindParam to a SQL literal string.
+    fn bind_param_literal(p: &BindParam) -> String {
+        match &p.value {
+            None => "NULL".to_string(),
+            Some(v) => match p.type_code {
+                // BIT
+                1 => format!("{}", v.first().copied().unwrap_or(0)),
+                // VARCHAR, CLOB — quoted (match before numeric range 2..=6)
+                3 | 14 => {
+                    let s = String::from_utf8_lossy(v);
+                    format!("'{}'", s.replace('\'', "''"))
+                }
+                // Numeric: TINYINT(2)/SMALLINT(6)/INT(4)/BIGINT(5)
+                2 | 6 | 4 | 5 => {
+                    if v.len() <= 8 {
+                        let mut buf = [0u8; 8];
+                        buf[..v.len()].copy_from_slice(v);
+                        match v.len() {
+                            1 => format!("{}", buf[0] as i8),
+                            2 => format!("{}", i16::from_le_bytes([buf[0], buf[1]])),
+                            4 => format!("{}", i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])),
+                            8 => format!("{}", i64::from_le_bytes(buf)),
+                            _ => String::from_utf8_lossy(v).to_string(),
+                        }
+                    } else {
+                        String::from_utf8_lossy(v).to_string()
+                    }
+                }
+                // FLOAT(7)/DOUBLE(8)
+                7 | 8 => {
+                    if v.len() == 4 {
+                        format!("{}", f32::from_le_bytes([v[0], v[1], v[2], v[3]]))
+                    } else if v.len() == 8 {
+                        format!("{}", f64::from_le_bytes([v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]]))
+                    } else {
+                        String::from_utf8_lossy(v).to_string()
+                    }
+                }
+                // DECIMAL (sent as string)
+                9 => String::from_utf8_lossy(v).to_string(),
+                // BLOB, VARBINARY — hex
+                13 | 18 => {
+                    let h: String = v.iter().map(|b| format!("{:02x}", b)).collect();
+                    format!("0x{}", h)
+                }
+                _ => {
+                    let h: String = v.iter().map(|b| format!("{:02x}", b)).collect();
+                    format!("0x{}", h)
+                }
+            },
+        }
+    }
+
+    /// Core execution: READY → OPTIMIZED_PREPARE_EXEC (OPE(91)) for no params,
+    /// or text substitution + OPE(91) for params.
     ///
     /// All SQL execution flows through this single method. The `params` slice
     /// may be empty (no parameters) or contain bound parameters. The `has_result_set`
@@ -540,86 +610,19 @@ impl Client {
             return Ok(rs);
         }
 
-        // With params: use OPE(91) with params embedded directly in payload
-        // DM 8.1 OPE(91) format: 20-byte header + param_descriptors + SQL + null
-        //
-        // 20-byte header (at payload offset 0):
-        //   0: auto_commit (1 byte)
-        //   1: param_count (2 bytes u16 LE)
-        //   3: has_result_set (1 byte)
-        //   4: reserved (4 bytes, zero)
-        //   8: param value offset (8 bytes i64 LE) = offset to where param values start
-        //
-        // Then param descriptors:
-        //   For each param: ioType(1) + typeCode(4) + precision(4) + scale(4) = 13 bytes each
-        //
-        // Then SQL text + null terminator
+        // With params: use text substitution + OPE(91) no-params path.
+        // DM 8.1.3.62 does NOT support OPE(91) with embedded params or BIND_EXEC2
+        // inline data — substitute values into SQL text and use the OPE(91) no-params path.
+        let substituted = Self::substitute_params(sql, params);
         self.write_all(&Frame::new(READY, 0, 0).encode())?;
         self.read_message()?;
-
-        let sql_bytes = sql.as_bytes();
-
-        // Calculate sizes
-        let param_desc_size = params.len() * 13; // ioType(1) + typeCode(4) + prec(4) + scale(4)
-        let param_value_offset = 20 + param_desc_size; // after descriptors, before values
-        
-        // Build 20-byte header
-        let mut header = vec![0u8; 20];
-        header[0] = if self.auto_commit { 1 } else { 0 };
-        header[1..3].copy_from_slice(&(params.len() as u16).to_le_bytes());
-        header[3] = if has_result_set { 1 } else { 0 };
-        header[8..16].copy_from_slice(&(param_value_offset as i64).to_le_bytes());
-        
-        // Build payload: header + param descriptors + param values + SQL
-        let mut payload = header;
-        
-        // Param descriptors
-        for param in params {
-            payload.push(param.direction as u8); // ioType
-            payload.extend_from_slice(&param.type_code.to_le_bytes());
-            payload.extend_from_slice(&param.precision.to_le_bytes());
-            payload.extend_from_slice(&param.scale.to_le_bytes());
-        }
-        
-        // Param values: for each param, write raw value bytes directly
-        for param in params {
-            match &param.value {
-                Some(val) => payload.extend_from_slice(val),
-                None => {} // NULL - write nothing (server handles via NULL indicator)
-            }
-        }
-        
-        // SQL + null
-        payload.extend_from_slice(sql_bytes);
-        payload.push(0);
-        
-        // Send OPE(91) with params embedded
-        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, self.handle, &payload))?;
-        
-        // Read response
-        let mut rs = self.read_exec_response(has_result_set)?;
-
-        eprintln!(
-            "DEBUG OPE(91) with params: has_result_set={} cols={} rows={} total={} cursor_id={}",
-            has_result_set,
-            rs.columns.len(),
-            rs.rows.len(),
-            rs.total_row_count,
-            rs.cursor_id,
-        );
-
-        // For SELECT with params, OPE(91) may return col_count=0 and total_row_count > 0.
-        // In this case the server expects us to use FETCH to retrieve the data.
-        if has_result_set && rs.columns.is_empty() && rs.total_row_count > 0 {
-            rs = self.fetch_from_bind_exec(self.handle, rs.total_row_count)?;
-        }
-
-        // Auto-commit for DML (non-SELECT) when auto_commit is on
+        let exec = ExecMessage::new(&substituted, 0);
+        self.write_all(&build_message(OPTIMIZED_PREPARE_EXEC, 0, &exec.encode_payload()))?;
+        let rs = self.read_exec_response(has_result_set)?;
         if self.auto_commit && !has_result_set {
             self.do_commit()?;
         }
-
-        Ok(rs)
+        return Ok(rs);
     }
 
     /// Stream LOB data for off-row params (BLOB/CLOB > 2048 bytes).
@@ -888,9 +891,6 @@ impl Client {
     /// not try to parse inline data — it must be fetched via FETCH.
     fn read_exec_response(&mut self, has_result_set: bool) -> Result<ResultSet> {
         let (frame, payload) = self.read_message()?;
-
-        eprintln!("DEBUG read_exec_response: msg_type={} response_code={} body_len={} payload_len={} has_result_set={}",
-            frame.msg_type, frame.response_code, frame.body_len, payload.len(), has_result_set);
 
         // Check for error response (negative response_code)
         if frame.response_code < 0 {
