@@ -1,107 +1,105 @@
 use dameng::Client;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // ── Test 1: commit ──
+    // ── User's exact pattern: commit(self), client usable after ──
     {
         let mut client = Client::new("127.0.0.1", 5236);
         client.connect("SYSDBA", "SYSDBA")?;
-        println!("Test 1: COMMIT");
+        println!("Test 1: commit(self), client after");
+
         let mut tx = client.transaction()?;
         tx.execute_with_params(
             "INSERT INTO SAMPLE (ID, NAME, AGE, ADDRESS) VALUES (?, ?, ?, ?)",
-            &[&300i32, &"CommitTest", &99i32, &"CommitAddr"],
+            &[&301i32, &"UserA", &20i32, &"AddrA"],
         )?;
-        let mut c = tx.commit()?;
-        println!("  committed!");
-        let rs = c.query_with_params("SELECT NAME FROM SAMPLE WHERE ID = ?", &[&300i32])?;
-        let mut found = false;
-        for row in rs.iter() {
-            println!("  found: NAME={}", row.get_str(0).unwrap_or("<NULL>"));
-            found = true;
-        }
-        assert!(found);
-        let mut tx = c.transaction()?;
-        tx.execute_with_params("DELETE FROM SAMPLE WHERE ID = ?", &[&300i32])?;
-        let _ = tx.commit()?;
-    }
-    println!("Test 1 PASSED\n");
+        tx.commit()?; // tx consumed, borrow released
 
-    // ── Test 2: rollback ──
+        // client works immediately!
+        let rs = client.query_with_params("SELECT NAME FROM SAMPLE WHERE ID = ?", &[&301i32])?;
+        for row in rs.iter() {
+            println!("  commit found: NAME={}", row.get_str(0).unwrap_or("<NULL"));
+        }
+        // Clean up
+        client.execute_with_params("DELETE FROM SAMPLE WHERE ID = ?", &[&301i32])?;
+        client.close()?;
+    }
+    println!("Test 1 PASSED ✓\n");
+
+    // ── rollback(self) ──
     {
         let mut client = Client::new("127.0.0.1", 5236);
         client.connect("SYSDBA", "SYSDBA")?;
-        println!("Test 2: ROLLBACK");
+        println!("Test 2: rollback(self)");
+
         let mut tx = client.transaction()?;
         tx.execute_with_params(
             "INSERT INTO SAMPLE (ID, NAME, AGE, ADDRESS) VALUES (?, ?, ?, ?)",
-            &[&400i32, &"RollbackTest", &50i32, &"RollbackAddr"],
+            &[&401i32, &"UserB", &30i32, &"AddrB"],
         )?;
-        let mut c = tx.rollback()?;
-        println!("  rolled back!");
-        let rs = c.query_with_params("SELECT COUNT(*) AS c FROM SAMPLE WHERE ID = ?", &[&400i32])?;
-        for row in rs.iter() {
-            let cnt: i32 = row.get(0).unwrap_or_default();
-            assert_eq!(cnt, 0);
-            println!("  count after rollback: {}", cnt);
-        }
-        c.close()?;
-    }
-    println!("Test 2 PASSED\n");
+        tx.rollback()?; // tx consumed, borrow released
 
-    // ── Test 3: Drop auto-rollback ──
+        let rs = client.query_with_params("SELECT COUNT(*) AS c FROM SAMPLE WHERE ID = ?", &[&401i32])?;
+        for row in rs.iter() {
+            assert_eq!(row.get::<i32>(0).unwrap_or_default(), 0);
+            println!("  after rollback: count=0 ✓");
+        }
+        client.close()?;
+    }
+    println!("Test 2 PASSED ✓\n");
+
+    // ── Drop auto-rollback ──
     {
+        let mut client = Client::new("127.0.0.1", 5236);
+        client.connect("SYSDBA", "SYSDBA")?;
         println!("Test 3: Drop auto-rollback");
+
         {
-            let mut client = Client::new("127.0.0.1", 5236);
-            client.connect("SYSDBA", "SYSDBA")?;
             let mut tx = client.transaction()?;
             tx.execute_with_params(
                 "INSERT INTO SAMPLE (ID, NAME, AGE, ADDRESS) VALUES (?, ?, ?, ?)",
-                &[&500i32, &"DropTest", &60i32, &"DropAddr"],
+                &[&501i32, &"UserC", &40i32, &"AddrC"],
             )?;
-            println!("  inserted, dropping tx (auto-rollback)...");
-            // tx dropped here → auto-rollback, client consumed
+            // No commit → Drop auto-rollbacks
         }
-        // Use a fresh client to verify the row was NOT committed
-        let mut c2 = Client::new("127.0.0.1", 5236);
-        c2.connect("SYSDBA", "SYSDBA")?;
-        let rs = c2.query_with_params("SELECT COUNT(*) AS c FROM SAMPLE WHERE ID = ?", &[&500i32])?;
+        // client available after Drop (borrow released by scope)
+        let rs = client.query_with_params("SELECT COUNT(*) AS c FROM SAMPLE WHERE ID = ?", &[&501i32])?;
         for row in rs.iter() {
-            let cnt: i32 = row.get(0).unwrap_or_default();
-            assert_eq!(cnt, 0);
-            println!("  count after drop: {}", cnt);
+            assert_eq!(row.get::<i32>(0).unwrap_or_default(), 0);
+            println!("  after drop: count=0 ✓");
         }
-        c2.close()?;
+        client.close()?;
     }
-    println!("Test 3 PASSED\n");
+    println!("Test 3 PASSED ✓\n");
 
-    // ── Test 4: batch rollback ──
+    // ── Multiple transactions on same client ──
     {
         let mut client = Client::new("127.0.0.1", 5236);
         client.connect("SYSDBA", "SYSDBA")?;
-        println!("Test 4: batch rollback");
-        let mut tx = client.transaction()?;
-        for id in 600..605 {
-            let name = format!("Batch{}", id);
-            tx.execute_with_params(
-                "INSERT INTO SAMPLE (ID, NAME, AGE, ADDRESS) VALUES (?, ?, ?, ?)",
-                &[&id, &name.as_str(), &25i32, &"BatchAddr"],
-            )?;
-        }
-        println!("  inserted 5 rows, rolling back...");
-        let mut c = tx.rollback()?;
-        for id in 600..605 {
-            let rs = c.query_with_params("SELECT COUNT(*) AS c FROM SAMPLE WHERE ID = ?", &[&id])?;
-            for row in rs.iter() {
-                let cnt: i32 = row.get(0).unwrap_or_default();
-                assert_eq!(cnt, 0);
-            }
-        }
-        println!("  all 5 rows rolled back!");
-        c.close()?;
-    }
-    println!("Test 4 PASSED\n");
+        println!("Test 4: multiple transactions");
 
-    println!("All transaction tests passed! (=^･ω･^=)");
+        let mut tx1 = client.transaction()?;
+        tx1.execute_with_params("INSERT INTO SAMPLE (ID, NAME, AGE, ADDRESS) VALUES (?, ?, ?, ?)", &[&601i32, &"Tx1", &10i32, &"A1"])?;
+        tx1.commit()?;
+
+        let mut tx2 = client.transaction()?;
+        tx2.execute_with_params("INSERT INTO SAMPLE (ID, NAME, AGE, ADDRESS) VALUES (?, ?, ?, ?)", &[&602i32, &"Tx2", &20i32, &"A2"])?;
+        tx2.rollback()?;
+
+        // tx1 data exists, tx2 data does not
+        let rs1 = client.query_with_params("SELECT NAME FROM SAMPLE WHERE ID = ?", &[&601i32])?;
+        let mut found = false;
+        for row in rs1.iter() { println!("  tx1: NAME={}", row.get_str(0).unwrap_or("")); found = true; }
+        assert!(found);
+
+        let rs2 = client.query_with_params("SELECT COUNT(*) FROM SAMPLE WHERE ID = ?", &[&602i32])?;
+        for row in rs2.iter() { assert_eq!(row.get::<i32>(0).unwrap_or(-1), 0); }
+
+        // Clean up
+        client.execute_with_params("DELETE FROM SAMPLE WHERE ID = ?", &[&601i32])?;
+        client.close()?;
+    }
+    println!("Test 4 PASSED ✓\n");
+
+    println!("All transaction tests passed! (=^ΦωΦ^=)");
     Ok(())
 }
