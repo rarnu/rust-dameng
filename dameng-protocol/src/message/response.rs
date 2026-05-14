@@ -774,6 +774,12 @@ impl ExecResponse {
                 }
 
                 offset = row_end;
+                // If DM reported a larger row_size, use it — prevents offset drift
+                // on multi-row responses where computed row_end may be 2 bytes short.
+                let reported = _row_size as usize;
+                if reported > 0 && row_start + reported > offset {
+                    offset = row_start + reported;
+                }
                 rows.push(Row { row_id: rec_id as u16, values });
             }
         }
