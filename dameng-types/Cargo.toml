@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Dameng database type definitions and conversions"
 license = "MIT"
+repository = "https://github.com/rarnu/rust-dameng"
+keywords = ["dameng", "database", "types"]
+categories = ["database"]
+readme = "../README.md"
 
 [dependencies]
 bytes = "1"

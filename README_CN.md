@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/dameng/badge.svg)](https://docs.rs/dameng)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-纯 Rust 实现的[达梦数据库](https://www.dameng.com/) (DM8) 同步驱动，API 设计参考 [rust-postgres](https://docs.rs/postgres/latest/postgres/)。
+纯 Rust 实现的[达梦数据库](https://www.dameng.com/) (DM8) 驱动。
 
 > [English Documentation](README.md)
 

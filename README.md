@@ -4,7 +4,7 @@
 [![Docs.rs](https://docs.rs/dameng/badge.svg)](https://docs.rs/dameng)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A pure-Rust, `postgres`-compatible driver for [Dameng Database](https://www.dameng.com/) (DM8).
+A pure-Rust driver for [Dameng Database](https://www.dameng.com/) (DM8).
 
 > [中文文档 (Chinese)](README_CN.md)
 

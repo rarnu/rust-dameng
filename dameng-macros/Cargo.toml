@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Proc macros for tokio-dameng: FromRow derive + query! macros"
 license = "MIT"
+repository = "https://github.com/rarnu/rust-dameng"
+keywords = ["dameng", "database", "macros"]
+categories = ["database"]
+readme = "../README.md"
 
 [lib]
 proc-macro = true

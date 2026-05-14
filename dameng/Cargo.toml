@@ -4,15 +4,19 @@ version = "0.1.0"
 edition = "2021"
 description = "Dameng database sync driver"
 license = "MIT"
+repository = "https://github.com/rarnu/rust-dameng"
+keywords = ["dameng", "database", "driver"]
+categories = ["database"]
+readme = "../README.md"
 
 [dependencies]
-dameng-protocol = { path = "../dameng-protocol" }
-dameng-types = { path = "../dameng-types" }
+dameng-protocol = "0.1.0"
+dameng-types = "0.1.0"
 bytes = "1"
 encoding_rs = "0.8"
 native-tls = "0.2"
 
 [dev-dependencies]
-tokio-dameng = { path = "../tokio-dameng" }
+tokio-dameng = "0.1.0"
 encoding_rs = "0.8"
 tokio = { version = "1", features = ["full"] }
