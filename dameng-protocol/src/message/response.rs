@@ -573,11 +573,11 @@ impl ExecResponse {
         // expanded 32-byte format starting at offset 16 (no compact first-column header).
         // We reuse the dynamic parser logic with col_count as the parsed count.
         let max_cols = if use_dynamic { 32 } else { (col_count as usize).max(columns.len()) };
-        let mut parsed_cols = columns.len() as usize;
+        let mut _parsed_cols = columns.len() as usize;
         // For BIND_EXEC2 (col_count == 0), start parsing at offset 16 (right after header),
         // reusing the expanded column parser loop below.
         if col_count == 0 {
-            parsed_cols = 0;
+            _parsed_cols = 0;
             offset = 16;
         }
         let mut parsed_cols = 1;

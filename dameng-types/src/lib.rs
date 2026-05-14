@@ -11,6 +11,7 @@ pub use encoding::{ServerEncoding, encode_to_server, decode_from_server};
 /// Dameng SQL value type enum.
 ///
 /// Maps DM type codes to Rust types for encoding and decoding.
+#[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DmValueType {
     BIT,           // 1
@@ -202,6 +203,7 @@ pub struct LobLocator {
     pub total_offset: i32,
 }
 
+#[allow(unused)]
 impl LobLocator {
     /// NBLOB_HEAD offsets (matching dm_go constants).
     /// NBLOB_HEAD_IN_ROW_FLAG = 0 (1 byte)

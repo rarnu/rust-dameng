@@ -8,7 +8,7 @@
 //! the mutable borrow on `Client` so it can be used again immediately.
 
 use crate::client::Client;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::row::ResultSet;
 use dameng_types::ToDmValue;
 

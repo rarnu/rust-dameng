@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use native_tls::{TlsConnector, TlsStream as NativeTlsStream};
 
-use bytes::{BufMut, BytesMut};
+use bytes::BytesMut;
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
 use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
@@ -159,6 +159,7 @@ impl Stream {
         }
     }
 
+    #[allow(unused)]
     fn set_read_timeout(&mut self, dur: Option<std::time::Duration>) -> std::io::Result<()> {
         match self {
             Stream::Tcp(s) => s.set_read_timeout(dur),
@@ -499,6 +500,7 @@ impl Client {
     }
 
     /// Internal: execute SQL with pre-built BindParams (shared by sqlx/query builder modules).
+    #[allow(unused)]
     pub(crate) fn do_execute_with_bind_params(
         &mut self,
         sql: &str,
@@ -626,6 +628,7 @@ impl Client {
     }
 
     /// Stream LOB data for off-row params (BLOB/CLOB > 2048 bytes).
+    #[allow(unused)]
     fn stream_lob_params(&mut self, stmt_id: u32, params: &[BindParam]) -> Result<()> {
         let off_row_params: Vec<usize> = params
             .iter()
@@ -659,6 +662,7 @@ impl Client {
     }
 
     /// Clone params, clearing value for off-row LOB placeholders.
+    #[allow(unused)]
     fn clear_off_row_placeholders(&self, params: &[BindParam]) -> Vec<BindParam> {
         let off_row_params: Vec<usize> = params
             .iter()
@@ -689,6 +693,7 @@ impl Client {
     ///
     /// When BIND_EXEC2 returns col_count=0 but total_row_count > 0,
     /// the data must be retrieved via FETCH messages.
+    #[allow(unused)]
     fn fetch_from_bind_exec(&mut self, stmt_id: u32, total_rows: u64) -> Result<ResultSet> {
         let mut all_columns = Vec::new();
         let mut all_rows = Vec::new();
@@ -794,6 +799,7 @@ impl Client {
 
     /// Commit with affected rows - sends COMMIT and reads queued EXEC_RESPONSE first.
     /// After OPE(91) DML, DM queues the EXEC_RESPONSE and sends it when we issue the
+    #[allow(unused)]
     fn do_commit_with_affected(&mut self) -> Result<u64> {
         // Send READY to trigger the server to flush queued EXEC_RESPONSE
         let ready_frame = Frame::new(READY, 0, 0);
