@@ -63,7 +63,7 @@ impl PooledConnection {
 
     /// Check if connection is still valid.
     pub async fn ping(&mut self) -> bool {
-        self.conn.as_mut().unwrap().query("SELECT 1 FROM DUAL").await.is_ok()
+        self.conn.as_mut().unwrap().query("SELECT 1").await.is_ok()
     }
 
     /// Execute DML with dynamic parameters.

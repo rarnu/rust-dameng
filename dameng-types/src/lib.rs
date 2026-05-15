@@ -575,13 +575,21 @@ impl ToDmValue for u16 {
 
 impl ToDmValue for u32 {
     fn to_dm_value(&self) -> DmValue {
-        DmValue::Int(*self as i32)
+        if *self <= i32::MAX as u32 {
+            DmValue::Int(*self as i32)
+        } else {
+            DmValue::BigInt(*self as i64)
+        }
     }
 }
 
 impl ToDmValue for u64 {
     fn to_dm_value(&self) -> DmValue {
-        DmValue::BigInt(*self as i64)
+        if *self <= i64::MAX as u64 {
+            DmValue::BigInt(*self as i64)
+        } else {
+            DmValue::Text(self.to_string())
+        }
     }
 }
 
@@ -703,13 +711,24 @@ pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
                 vec![0; 2]
             }
         }
-        DmValueType::DOUBLE | DmValueType::FLOAT | DmValueType::REAL => {
+        DmValueType::FLOAT | DmValueType::REAL => {
+            // Always 4 bytes
+            if let DmValue::Float(v) = value {
+                v.to_le_bytes().to_vec()
+            } else if let DmValue::Double(v) = value {
+                (*v as f32).to_le_bytes().to_vec()
+            } else {
+                vec![0u8; 4]
+            }
+        }
+        DmValueType::DOUBLE => {
+            // Always 8 bytes
             if let DmValue::Double(v) = value {
                 v.to_le_bytes().to_vec()
             } else if let DmValue::Float(v) = value {
-                v.to_le_bytes().to_vec()
+                (*v as f64).to_le_bytes().to_vec()
             } else {
-                vec![0; 8]
+                vec![0u8; 8]
             }
         }
         DmValueType::BIT | DmValueType::BOOLEAN => {
