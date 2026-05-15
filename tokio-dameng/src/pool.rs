@@ -65,6 +65,55 @@ impl PooledConnection {
     pub async fn ping(&mut self) -> bool {
         self.conn.as_mut().unwrap().query("SELECT 1 FROM DUAL").await.is_ok()
     }
+
+    /// Execute DML with dynamic parameters.
+    pub async fn execute_with_params(
+        &mut self,
+        sql: &str,
+        params: &[&dyn dameng_types::ToDmValue],
+    ) -> Result<u64> {
+        self.conn.as_mut().unwrap().execute_with_params(sql, params).await
+    }
+
+    /// Execute SELECT with dynamic parameters.
+    pub async fn query_with_params(
+        &mut self,
+        sql: &str,
+        params: &[&dyn dameng_types::ToDmValue],
+    ) -> Result<crate::row::ResultSet> {
+        self.conn.as_mut().unwrap().query_with_params(sql, params).await
+    }
+
+    /// Fetch more rows from a result set.
+    pub async fn fetch_more(
+        &mut self,
+        result_set: &mut crate::row::ResultSet,
+        start_row: usize,
+        prefetch_bytes: i32,
+    ) -> Result<u64> {
+        self.conn.as_mut().unwrap().fetch_more(result_set, start_row, prefetch_bytes).await
+    }
+
+    /// Set transaction isolation level.
+    pub async fn set_isolation(
+        &mut self,
+        level: dameng_protocol::message::isolation::IsolationLevel,
+    ) -> Result<()> {
+        self.conn.as_mut().unwrap().set_isolation(level).await
+    }
+
+    /// Read LOB data from a LOB locator.
+    pub async fn read_lob(&mut self, locator: &dameng_types::LobLocator) -> Result<Vec<u8>> {
+        self.conn.as_mut().unwrap().read_lob(locator).await
+    }
+
+    /// Read output parameters from a stored procedure call.
+    pub fn read_output_params(
+        &self,
+        params: &[dameng_protocol::message::BindParam],
+    ) -> Vec<(i32, Vec<u8>)> {
+        self.conn.as_ref().unwrap().read_output_params(params)
+    }
 }
 
 impl Drop for PooledConnection {

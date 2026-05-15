@@ -1151,6 +1151,29 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        // Try to send CLOSE via try_write on TCP streams; skip for TLS.
+        if matches!(self.state, State::Ready) {
+            let close_msg = CloseMessage;
+            let payload = close_msg.encode_payload();
+            let frame_data = build_message(CLOSE, self.handle, &payload);
+            if let Some(Stream::Tcp(s)) = &mut self.stream {
+                use tokio::io::AsyncWriteExt;
+                let _ = s.try_write(&frame_data);
+            }
+        }
+        // Shutdown the underlying TCP stream
+        if let Some(stream) = self.stream.take() {
+            match stream {
+                Stream::Tcp(s) => {
+                    if let Ok(std_stream) = s.into_std() {
+                        let _ = std_stream.shutdown(std::net::Shutdown::Both);
+                    }
+                }
+                Stream::Tls(_s) => {
+                    // TLS stream: drop will close the connection
+                }
+            }
+        }
         self.state = State::Closed;
     }
 }
