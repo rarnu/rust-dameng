@@ -118,6 +118,46 @@ fn to_bind_param(value: &dyn dameng_types::ToDmValue) -> dameng_protocol::messag
             direction: dameng_protocol::message::ParameterDirection::Input,
             value: Some(loc.raw.to_vec()),
         },
+        dameng_types::DmValue::Date(d) => dameng_protocol::message::BindParam {
+            type_name: "DATE".to_string(),
+            type_code: 10,
+            precision: 0,
+            scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(d.format("%Y-%m-%d").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Time(t) => dameng_protocol::message::BindParam {
+            type_name: "TIME".to_string(),
+            type_code: 11,
+            precision: 0,
+            scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(t.format("%H:%M:%S").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Timestamp(ts) => dameng_protocol::message::BindParam {
+            type_name: "TIMESTAMP".to_string(),
+            type_code: 12,
+            precision: 0,
+            scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(ts.format("%Y-%m-%d %H:%M:%S").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Decimal(dec) => dameng_protocol::message::BindParam {
+            type_name: "DECIMAL".to_string(),
+            type_code: 9,
+            precision: 0,
+            scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(dec.to_string().into_bytes()),
+        },
+        _ => dameng_protocol::message::BindParam {
+            type_name: "INT".to_string(),
+            type_code: 4,
+            precision: 0,
+            scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: None,
+        },
     }
 }
 use dameng_protocol::Row;

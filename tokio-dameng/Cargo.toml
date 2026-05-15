@@ -12,6 +12,8 @@ readme = "../README.md"
 [dependencies]
 dameng-protocol = { version = "0.1.0", path = "../dameng-protocol" }
 dameng-types = { version = "0.1.0", path = "../dameng-types" }
+rust_decimal = "1"
+chrono = "0.4"
 dameng-macros = { version = "0.1.0", path = "../dameng-macros" }
 bytes = "1"
 tokio = { version = "1", features = ["full"] }

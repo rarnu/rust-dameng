@@ -172,10 +172,12 @@ name = "dameng"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chrono",
  "dameng-protocol",
  "dameng-types",
  "encoding_rs",
  "native-tls",
+ "rust_decimal",
  "tokio",
  "tokio-dameng",
 ]
@@ -974,12 +976,14 @@ name = "tokio-dameng"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chrono",
  "dameng-macros",
  "dameng-protocol",
  "dameng-types",
  "encoding_rs",
  "log",
  "native-tls",
+ "rust_decimal",
  "tokio",
  "tokio-native-tls",
 ]

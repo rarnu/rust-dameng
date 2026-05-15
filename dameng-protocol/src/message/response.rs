@@ -443,6 +443,32 @@ pub struct ExecResponse {
     pub rows: Vec<Row>,
 }
 
+/// Decode DM binary DECIMAL to text representation.
+fn decode_dm_decimal_to_text(data: &[u8], scale: i16) -> Option<String> {
+    const FLAG_ZERO: u8 = 0x80;
+    const FLAG_POSITIVE: i32 = 0xC1;
+    const FLAG_NEGTIVE: i32 = 0x3E;
+    const NUM_POSITIVE: i32 = 1;
+    const NUM_NEGTIVE: i32 = 101;
+    if data.is_empty() || data.len() > 21 { return None; }
+    if data[0] == FLAG_ZERO || data.len() == 1 { return Some("0".to_string()); }
+    let sign = if data[0] & FLAG_ZERO != 0 { "" } else { "-" };
+    let flag = data[0] as i32;
+    let _exp = if !sign.is_empty() { flag - FLAG_POSITIVE } else { FLAG_NEGTIVE - flag };
+    let mut sf = String::new();
+    for &b in &data[1..] {
+        let digit = if sign.is_empty() {
+            b as i32 - NUM_POSITIVE
+        } else {
+            NUM_NEGTIVE - b as i32
+        };
+        if digit < 0 || digit > 99 { break; }
+        sf.push_str(&format!("{:02}", digit));
+    }
+    if sf.is_empty() { return None; }
+    Some(format!("{}{}", sign, sf.trim_start_matches('0')))
+}
+
 impl ExecResponse {
     /// Parse from raw payload bytes.
     ///
@@ -605,6 +631,11 @@ impl ExecResponse {
                 data[header_off], data[header_off + 1],
                 data[header_off + 2], data[header_off + 3],
             ]);
+            // If c_type is 0 or invalid, we've hit row data — stop parsing columns
+            if _c_type == 0 || _c_type < -100 || _c_type > 100 {
+                offset = row_start;
+                break;
+            }
             // precision/scale at offsets 4-11, not needed for basic parsing
             let c_nullable = u32::from_le_bytes([
                 data[header_off + 12], data[header_off + 13],
@@ -726,6 +757,21 @@ impl ExecResponse {
                 for _ in 1..columns.len() {
                     values.push(None);
                 }
+                // Decode string columns from server encoding, DECIMAL to text
+                for ci in 0..columns.len().min(values.len()) {
+                    if matches!(columns[ci].type_code, 3 | 14 | 16 | 23) {
+                        if let Some(ref val_bytes) = values[ci] {
+                            let decoded = decode_from_server(server_encoding, val_bytes);
+                            values[ci] = Some(decoded.into_bytes());
+                        }
+                    } else if matches!(columns[ci].type_code, 9 | 20) {
+                        if let Some(ref val_bytes) = values[ci] {
+                            if let Some(text) = decode_dm_decimal_to_text(val_bytes, columns[ci].scale) {
+                                values[ci] = Some(text.into_bytes());
+                            }
+                        }
+                    }
+                }
                 rows.push(Row { row_id: row_start as u16, values });
             }
         } else {
@@ -774,11 +820,24 @@ impl ExecResponse {
                 }
 
                 offset = row_end;
-                // If DM reported a larger row_size, use it — prevents offset drift
-                // on multi-row responses where computed row_end may be 2 bytes short.
                 let reported = _row_size as usize;
                 if reported > 0 && row_start + reported > offset {
                     offset = row_start + reported;
+                }
+                // Decode string columns from server encoding, DECIMAL to text
+                for ci in 0..columns.len().min(values.len()) {
+                    if matches!(columns[ci].type_code, 3 | 14 | 16 | 23) {
+                        if let Some(ref val_bytes) = values[ci] {
+                            let decoded = decode_from_server(server_encoding, val_bytes);
+                            values[ci] = Some(decoded.into_bytes());
+                        }
+                    } else if matches!(columns[ci].type_code, 9 | 20) {
+                        if let Some(ref val_bytes) = values[ci] {
+                            if let Some(text) = decode_dm_decimal_to_text(val_bytes, columns[ci].scale) {
+                                values[ci] = Some(text.into_bytes());
+                            }
+                        }
+                    }
                 }
                 rows.push(Row { row_id: rec_id as u16, values });
             }

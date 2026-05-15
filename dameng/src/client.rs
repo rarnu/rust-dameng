@@ -122,6 +122,46 @@ fn to_bind_param(value: &dyn dameng_types::ToDmValue) -> BindParam {
             direction: ParameterDirection::Input,
             value: Some(loc.raw.to_vec()),
         },
+        dameng_types::DmValue::Date(d) => BindParam {
+            type_name: "DATE".to_string(),
+            type_code: 10,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(d.format("%Y-%m-%d").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Time(t) => BindParam {
+            type_name: "TIME".to_string(),
+            type_code: 11,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(t.format("%H:%M:%S").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Timestamp(ts) => BindParam {
+            type_name: "TIMESTAMP".to_string(),
+            type_code: 12,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(ts.format("%Y-%m-%d %H:%M:%S").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Decimal(dec) => BindParam {
+            type_name: "DECIMAL".to_string(),
+            type_code: 9,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: Some(dec.to_string().into_bytes()),
+        },
+        _ => BindParam {
+            type_name: "INT".to_string(),
+            type_code: 4,
+            precision: 0,
+            scale: 0,
+            direction: ParameterDirection::Input,
+            value: None,
+        },
     }
 }
 
@@ -588,6 +628,11 @@ impl Client {
                 }
                 // DECIMAL (sent as string)
                 9 => String::from_utf8_lossy(v).to_string(),
+                // DATE, TIME, TIMESTAMP — quoted string
+                10 | 11 | 12 => {
+                    let s = String::from_utf8_lossy(v);
+                    format!("'{}'", s.replace('\'', "''"))
+                }
                 // BLOB, VARBINARY — hex
                 13 | 18 => {
                     let h: String = v.iter().map(|b| format!("{:02x}", b)).collect();

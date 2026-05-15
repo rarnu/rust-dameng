@@ -3,6 +3,7 @@
 //! Provides SQLx-style `row.get::<T>(idx)` API and iterator support.
 
 use std::ops::Deref;
+use std::str::FromStr;
 
 use dameng_protocol::Row;
 
@@ -346,6 +347,125 @@ impl<'de> DmDecode<'de> for String {
     }
 }
 
+/// Returns a Decimal from DECIMAL type (text, already decoded in response parser).
+impl<'de> DmDecode<'de> for rust_decimal::Decimal {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        let s = std::str::from_utf8(bytes).map_err(|_| {
+            crate::error::Error::DecodeError("DECIMAL is not valid UTF-8".to_string())
+        })?;
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed == "0" {
+            return Ok(rust_decimal::Decimal::ZERO);
+        }
+        rust_decimal::Decimal::from_str(trimmed).map_err(|e| {
+            crate::error::Error::DecodeError(format!("invalid DECIMAL '{}' : {}", trimmed, e))
+        })
+    }
+}
+
+/// Returns a NaiveDate from DATE type.
+impl<'de> DmDecode<'de> for chrono::NaiveDate {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column value is empty".to_string()));
+        }
+        // Try text format first
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
+                return Ok(d);
+            }
+        }
+        // Try binary format (7 bytes: year:2BE, month:1, day:1, hour:1, min:1, sec:1)
+        // Try 3-byte DM row format (DATE_PREC = 3, year+month+day compressed)
+        if bytes.len() >= 3 && bytes.len() < 7 {
+            let year = i32::from(i16::from_le_bytes([bytes[0], bytes[1]])) & 0x7FFF;
+            let month = ((bytes[1] as u32 >> 7) & 0x1) + ((bytes[2] as u32 & 0x07) << 1);
+            let day = ((bytes[2] as u32 & 0xF8) >> 3) & 0x1F;
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                return Ok(d);
+            }
+        }
+        // Try 7-byte OPE format
+        if bytes.len() >= 7 {
+            let year = u16::from_be_bytes([bytes[0], bytes[1]]) as i32;
+            let month = bytes[2] as u32;
+            let day = bytes[3] as u32;
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                return Ok(d);
+            }
+        }
+        // Try 8-byte DM row format (DATE_PREC = 7 but stored in 8 bytes)
+        if bytes.len() >= 8 {
+            let year = i32::from(i16::from_le_bytes([bytes[0], bytes[1]])) & 0x7FFF;
+            let month = ((bytes[1] as u32 >> 7) & 0x1) + ((bytes[2] as u32 & 0x07) << 1);
+            let day = ((bytes[2] as u32 & 0xF8) >> 3) & 0x1F;
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                return Ok(d);
+            }
+        }
+        Err(crate::error::Error::DecodeError("too short for DATE".to_string()))
+    }
+}
+
+/// Returns a NaiveDateTime from TIMESTAMP type.
+impl<'de> DmDecode<'de> for chrono::NaiveDateTime {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        let bytes = value.ok_or_else(|| {
+            crate::error::Error::DecodeError("column is NULL".to_string())
+        })?;
+        if bytes.is_empty() {
+            return Err(crate::error::Error::DecodeError("column value is empty".to_string()));
+        }
+        // Try text format first
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            let s = s.trim();
+            if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                return Ok(ts);
+            }
+            if let Ok(ts) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+                return Ok(ts);
+            }
+        }
+        // Try 11-byte OPE format (year:2BE, month:1, day:1, hour:1, min:1, sec:1, nano:4BE)
+        if bytes.len() >= 11 {
+            let year = u16::from_be_bytes([bytes[0], bytes[1]]) as i32;
+            let month = bytes[2] as u32;
+            let day = bytes[3] as u32;
+            let hour = bytes[4] as u32;
+            let minute = bytes[5] as u32;
+            let second = bytes[6] as u32;
+            let nano = u32::from_be_bytes([bytes[7], bytes[8], bytes[9], bytes[10]]);
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day)
+                .and_then(|d| d.and_hms_nano_opt(hour, minute, second, nano))
+            {
+                return Ok(d);
+            }
+        }
+        // Try 8-byte DM row format (DATETIME_PREC)
+        if bytes.len() >= 8 {
+            let year = i32::from(i16::from_le_bytes([bytes[0], bytes[1]])) & 0x7FFF;
+            let month = ((bytes[1] as u32 >> 7) & 0x1) + ((bytes[2] as u32 & 0x07) << 1);
+            let day = ((bytes[2] as u32 & 0xF8) >> 3) & 0x1F;
+            let hour = bytes[3] as u32 & 0x1F;
+            let minute = ((bytes[3] as u32 >> 5) & 0x07) + ((bytes[4] as u32 & 0x07) << 3);
+            let second = ((bytes[4] as u32 >> 3) & 0x1F) + ((bytes[5] as u32 & 0x01) << 5);
+            let nano = (((bytes[5] as u32 >> 1) & 0x7F) + ((bytes[6] as u32 & 0xFF) << 7) + ((bytes[7] as u32 & 0x1F) << 15)) * 1000;
+            if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day)
+                .and_then(|d| d.and_hms_nano_opt(hour, minute, second, nano))
+            {
+                return Ok(d);
+            }
+        }
+        Err(crate::error::Error::DecodeError("too short for TIMESTAMP".to_string()))
+    }
+}
+
 impl<'de> DmDecode<'de> for Vec<u8> {
     fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
         match value {
@@ -410,6 +530,39 @@ impl<'de> DmDecode<'de> for Option<Vec<u8>> {
     fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
         match value {
             Some(bytes) if !bytes.is_empty() => Ok(Some(bytes.to_vec())),
+            _ => Ok(None),
+        }
+    }
+}
+
+impl<'de> DmDecode<'de> for Option<rust_decimal::Decimal> {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        match value {
+            Some(bytes) if !bytes.is_empty() => {
+                <rust_decimal::Decimal as DmDecode>::decode(Some(bytes)).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+impl<'de> DmDecode<'de> for Option<chrono::NaiveDate> {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        match value {
+            Some(bytes) if !bytes.is_empty() => {
+                <chrono::NaiveDate as DmDecode>::decode(Some(bytes)).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+impl<'de> DmDecode<'de> for Option<chrono::NaiveDateTime> {
+    fn decode(value: Option<&'de [u8]>) -> crate::error::Result<Self> {
+        match value {
+            Some(bytes) if !bytes.is_empty() => {
+                <chrono::NaiveDateTime as DmDecode>::decode(Some(bytes)).map(Some)
+            }
             _ => Ok(None),
         }
     }

@@ -139,9 +139,28 @@ fn make_bind_param(value: dameng_types::DmValue) -> dameng_protocol::message::Bi
             precision: 0,
             scale: 0,
             direction: dameng_protocol::message::ParameterDirection::Input,
-            // LOB locator cannot be used as input parameter yet;
-            // pass raw bytes as a placeholder (LOB binding via LOBREAD needs full impl)
             value: Some(loc.raw.to_vec()),
+        },
+        dameng_types::DmValue::Date(d) => dameng_protocol::message::BindParam {
+            type_name: "DATE".to_string(),
+            type_code: 10,
+            precision: 0, scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(d.format("%Y-%m-%d").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Time(t) => dameng_protocol::message::BindParam {
+            type_name: "TIME".to_string(),
+            type_code: 11,
+            precision: 0, scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(t.format("%H:%M:%S").to_string().into_bytes()),
+        },
+        dameng_types::DmValue::Timestamp(ts) => dameng_protocol::message::BindParam {
+            type_name: "TIMESTAMP".to_string(),
+            type_code: 12,
+            precision: 0, scale: 0,
+            direction: dameng_protocol::message::ParameterDirection::Input,
+            value: Some(ts.format("%Y-%m-%d %H:%M:%S").to_string().into_bytes()),
         },
     }
 }

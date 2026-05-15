@@ -171,6 +171,12 @@ pub enum DmValue {
     Text(String),
     Bytea(Vec<u8>),
     Decimal(rust_decimal::Decimal),
+    /// DATE value (chrono::NaiveDate).
+    Date(chrono::NaiveDate),
+    /// TIME value (chrono::NaiveTime).
+    Time(chrono::NaiveTime),
+    /// TIMESTAMP / DATETIME value (chrono::NaiveDateTime).
+    Timestamp(chrono::NaiveDateTime),
     /// LOB_LOCATOR: DM server returns a 16-byte locator handle when CLOB/BLOB
     /// data exceeds 2048 bytes. The actual content must be fetched via LOBREAD
     /// protocol messages. This variant stores the raw 16-byte locator.
@@ -629,6 +635,9 @@ macro_rules! impl_option_to_dm_value {
 }
 
 impl_option_to_dm_value!(bool, i8, i16, i32, i64, f32, f64, String);
+impl_option_to_dm_value!(rust_decimal::Decimal);
+impl_option_to_dm_value!(chrono::NaiveDate);
+impl_option_to_dm_value!(chrono::NaiveDateTime);
 
 impl ToDmValue for Option<&str> {
     fn to_dm_value(&self) -> DmValue {
@@ -641,6 +650,32 @@ impl ToDmValue for Option<&str> {
 impl ToDmValue for Option<Vec<u8>> {
     fn to_dm_value(&self) -> DmValue {
         self.clone().map(DmValue::Bytea).unwrap_or(DmValue::Null)
+    }
+}
+
+// --- ToDmValue for chrono / rust_decimal types ---
+
+impl ToDmValue for rust_decimal::Decimal {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Decimal(*self)
+    }
+}
+
+impl ToDmValue for chrono::NaiveDate {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Date(*self)
+    }
+}
+
+impl ToDmValue for chrono::NaiveTime {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Time(*self)
+    }
+}
+
+impl ToDmValue for chrono::NaiveDateTime {
+    fn to_dm_value(&self) -> DmValue {
+        DmValue::Timestamp(*self)
     }
 }
 
@@ -715,7 +750,13 @@ pub fn encode_value(ty: DmValueType, value: &DmValue) -> Vec<u8> {
         DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP
         | DmValueType::DATETIME | DmValueType::DATETIME2 | DmValueType::TIME_TZ
         | DmValueType::DATETIME_TZ | DmValueType::DATETIME2_TZ => {
-            if let DmValue::Text(v) = value {
+            if let DmValue::Date(d) = value {
+                d.format("%Y-%m-%d").to_string().as_bytes().to_vec()
+            } else if let DmValue::Time(t) = value {
+                t.format("%H:%M:%S").to_string().as_bytes().to_vec()
+            } else if let DmValue::Timestamp(ts) = value {
+                ts.format("%Y-%m-%d %H:%M:%S").to_string().as_bytes().to_vec()
+            } else if let DmValue::Text(v) = value {
                 v.as_bytes().to_vec()
             } else {
                 vec![]
@@ -890,6 +931,42 @@ pub fn parse_output_param_value(bytes: &[u8], type_code: i32) -> Option<DmValue>
     decode_value(ty, bytes, None)
 }
 
+/// Decode DM binary DECIMAL format (matches Go driver dm_go/o.go decodeDecimal).
+fn decode_dm_binary_decimal(data: &[u8]) -> Option<rust_decimal::Decimal> {
+    const FLAG_ZERO: u8 = 0x80;
+    const FLAG_POSITIVE: i32 = 0xC1;
+    const FLAG_NEGTIVE: i32 = 0x3E;
+    const NUM_POSITIVE: i32 = 1;
+    const NUM_NEGTIVE: i32 = 101;
+
+    if data.is_empty() || data.len() > 21 {
+        return None;
+    }
+    if data[0] == FLAG_ZERO || data.len() == 1 {
+        return Some(rust_decimal::Decimal::ZERO);
+    }
+    let sign: i32 = if data[0] & FLAG_ZERO != 0 { 1 } else { -1 };
+    let flag = data[0] as i32;
+    let _exp = if sign > 0 { flag - FLAG_POSITIVE } else { FLAG_NEGTIVE - flag };
+    let mut sf = String::new();
+    for &b in &data[1..] {
+        let digit = if sign > 0 {
+            b as i32 - NUM_POSITIVE
+        } else {
+            NUM_NEGTIVE - b as i32
+        };
+        if digit < 0 || digit > 99 {
+            break;
+        }
+        sf.push_str(&format!("{:02}", digit));
+    }
+    if sf.is_empty() {
+        return None;
+    }
+    let int_val: i64 = sf.parse().ok()?;
+    Some(rust_decimal::Decimal::from_i128_with_scale(int_val as i128, 0))
+}
+
 /// Decode DM protocol bytes to a Rust value.
 ///
 /// # Arguments
@@ -1027,84 +1104,108 @@ pub fn decode_value(ty: DmValueType, data: &[u8], lob_meta: Option<(i32, i16)>) 
             }
         }
         DmValueType::DECIMAL | DmValueType::NUMERIC => {
-            let s = String::from_utf8_lossy(data);
-            rust_decimal::Decimal::from_str(&s).ok().map(DmValue::Decimal)
+            // Try text format first (ASCII digits)
+            if let Ok(s) = std::str::from_utf8(data) {
+                if let Ok(d) = rust_decimal::Decimal::from_str(s.trim()) {
+                    return Some(DmValue::Decimal(d));
+                }
+            }
+            // Try DM binary DECIMAL format (matches Go driver o.go)
+            decode_dm_binary_decimal(data).map(DmValue::Decimal)
         }
-        DmValueType::TINYINT => {
-            Some(DmValue::TinyInt(data[0] as i8))
-        }
-        DmValueType::DATE | DmValueType::TIME | DmValueType::TIMESTAMP | DmValueType::INTERVAL
-        | DmValueType::DATETIME | DmValueType::DATETIME2 | DmValueType::TIME_TZ
-        | DmValueType::DATETIME_TZ | DmValueType::DATETIME2_TZ | DmValueType::INTERVAL_YM
+        DmValueType::TINYINT => Some(DmValue::TinyInt(data[0] as i8)),
+        DmValueType::DATE
+        | DmValueType::TIME
+        | DmValueType::TIMESTAMP
+        | DmValueType::INTERVAL
+        | DmValueType::DATETIME
+        | DmValueType::DATETIME2
+        | DmValueType::TIME_TZ
+        | DmValueType::DATETIME_TZ
+        | DmValueType::DATETIME2_TZ
+        | DmValueType::INTERVAL_YM
         | DmValueType::INTERVAL_DT => {
             // DM stores DATE/TIME/TIMESTAMP/INTERVAL as binary:
-            // DATE: 7 bytes (year:2, month:1, day:1, hour:1, min:1, sec:1)
-            // TIME: 6 bytes (hour:1, min:1, sec:1, nanosec:4)
-            // TIMESTAMP: 11 bytes (year:2, month:1, day:1, hour:1, min:1, sec:1, nanosec:4)
-            // If data is text (string), pass through; otherwise decode binary.
-            match String::from_utf8(data.to_vec()) {
-                Ok(s) => Some(DmValue::Text(s)),
-                Err(_) => {
-                    // Try binary decode for TIMESTAMP (11 bytes)
-                    if ty == DmValueType::TIMESTAMP && data.len() >= 11 {
-                        let year = u16::from_be_bytes([data[0], data[1]]) as i32;
-                        let month = data[2];
-                        let day = data[3];
-                        let hour = data[4];
-                        let minute = data[5];
-                        let second = data[6];
-                        let nano = u32::from_be_bytes([data[7], data[8], data[9], data[10]]);
-                        let s = if nano > 0 {
-                            format!(
-                                "{}-{:02}-{:02} {:02}:{:02}:{:02}.{:09}",
-                                year, month, day, hour, minute, second, nano
-                            )
-                        } else {
-                            format!(
-                                "{}-{:02}-{:02} {:02}:{:02}:{:02}",
-                                year, month, day, hour, minute, second
-                            )
-                        };
-                        Some(DmValue::Text(s))
-                    } else if ty == DmValueType::DATE && data.len() >= 7 {
-                        let year = u16::from_be_bytes([data[0], data[1]]) as i32;
-                        let month = data[2];
-                        let day = data[3];
-                        let hour = data[4];
-                        let minute = data[5];
-                        let second = data[6];
-                        let s = format!(
-                            "{}-{:02}-{:02} {:02}:{:02}:{:02}",
-                            year, month, day, hour, minute, second
-                        );
-                        Some(DmValue::Text(s))
-                    } else if ty == DmValueType::TIME && data.len() >= 6 {
-                        let hour = data[0];
-                        let minute = data[1];
-                        let second = data[2];
-                        let nano = if data.len() >= 10 {
-                            u32::from_be_bytes([data[3], data[4], data[5], data[6]])
-                        } else {
-                            0
-                        };
-                        let s = if nano > 0 {
-                            format!(
-                                "{:02}:{:02}:{:02}.{:09}",
-                                hour, minute, second, nano
-                            )
-                        } else {
-                            format!("{:02}:{:02}:{:02}", hour, minute, second)
-                        };
-                        Some(DmValue::Text(s))
-                    } else if ty == DmValueType::INTERVAL {
-                        // INTERVAL: decode as text representation
-                        // DM stores INTERVAL as binary or text; fallback to lossy UTF-8
-                        Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))
-                    } else {
-                        // Fallback: try as UTF-8 lossy
-                        Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))
+            // DATE: 7 bytes (year:2BE, month:1, day:1, hour:1, min:1, sec:1)
+            // TIME: 6+ bytes (hour:1, min:1, sec:1, nanosec:4BE)
+            // TIMESTAMP: 11 bytes (year:2BE, month:1, day:1, hour:1, min:1, sec:1, nanosec:4BE)
+            // If data is valid UTF-8 text, pass through as Text.
+            // Otherwise decode binary to typed chrono variants.
+            if let Ok(s) = String::from_utf8(data.to_vec()) {
+                return Some(DmValue::Text(s));
+            }
+            // Binary decode for TIMESTAMP / DATETIME
+            if ty == DmValueType::TIMESTAMP || ty == DmValueType::DATETIME || ty == DmValueType::DATETIME2 {
+                // Try 11-byte OPE format
+                if data.len() >= 11 {
+                    let year = u16::from_be_bytes([data[0], data[1]]) as i32;
+                    let month = data[2] as u32;
+                    let day = data[3] as u32;
+                    let hour = data[4] as u32;
+                    let min = data[5] as u32;
+                    let sec = data[6] as u32;
+                    let nano = u32::from_be_bytes([data[7], data[8], data[9], data[10]]);
+                    if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day)
+                        .and_then(|d| d.and_hms_nano_opt(hour, min, sec, nano))
+                    { return Some(DmValue::Timestamp(d)); }
+                }
+                // Try 8-byte DM row format
+                if data.len() >= 8 {
+                    let year = i32::from(i16::from_le_bytes([data[0], data[1]])) & 0x7FFF;
+                    let month = ((data[1] as u32 >> 7) & 0x1) + ((data[2] as u32 & 0x07) << 1);
+                    let day = ((data[2] as u32 & 0xF8) >> 3) & 0x1F;
+                    let hour = data[3] as u32 & 0x1F;
+                    let min = ((data[3] as u32 >> 5) & 0x07) + ((data[4] as u32 & 0x07) << 3);
+                    let sec = ((data[4] as u32 >> 3) & 0x1F) + ((data[5] as u32 & 0x01) << 5);
+                    let nano = (((data[5] as u32 >> 1) & 0x7F) + ((data[6] as u32 & 0xFF) << 7) + ((data[7] as u32 & 0x1F) << 15)) * 1000;
+                    if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day)
+                        .and_then(|d| d.and_hms_nano_opt(hour, min, sec, nano))
+                    { return Some(DmValue::Timestamp(d)); }
+                }
+                None
+            } else if ty == DmValueType::DATE {
+                // Try 3-byte DM row format first (DATE_PREC = 3)
+                if data.len() >= 3 && data.len() < 7 {
+                    let year = i32::from(i16::from_le_bytes([data[0], data[1]])) & 0x7FFF;
+                    let month = ((data[1] as u32 >> 7) & 0x1) + ((data[2] as u32 & 0x07) << 1);
+                    let day = ((data[2] as u32 & 0xF8) >> 3) & 0x1F;
+                    if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day) {
+                        return Some(DmValue::Date(d));
                     }
                 }
+                if data.len() >= 7 {
+                    let year = u16::from_be_bytes([data[0], data[1]]) as i32;
+                    let month = data[2] as u32;
+                    let day = data[3] as u32;
+                    if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day) { return Some(DmValue::Date(d)); }
+                }
+                if data.len() >= 8 {
+                    let year = i32::from(i16::from_le_bytes([data[0], data[1]])) & 0x7FFF;
+                    let month = ((data[1] as u32 >> 7) & 0x1) + ((data[2] as u32 & 0x07) << 1);
+                    let day = ((data[2] as u32 & 0xF8) >> 3) & 0x1F;
+                    if let Some(d) = chrono::NaiveDate::from_ymd_opt(year, month, day) { return Some(DmValue::Date(d)); }
+                }
+                None
+                    .map(DmValue::Date)
+            } else if ty == DmValueType::TIME && data.len() >= 6 {
+                let hour = data[0] as u32;
+                let minute = data[1] as u32;
+                let second = data[2] as u32;
+                let nano = if data.len() >= 10 {
+                    u32::from_be_bytes([data[3], data[4], data[5], data[6]])
+                } else {
+                    0
+                };
+                chrono::NaiveTime::from_hms_nano_opt(hour, minute, second, nano)
+                    .map(DmValue::Time)
+            } else if ty == DmValueType::INTERVAL
+                || ty == DmValueType::INTERVAL_YM
+                || ty == DmValueType::INTERVAL_DT
+            {
+                Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))
+            } else {
+                // Fallback for TIME_TZ, DATETIME_TZ, DATETIME2_TZ: text
+                Some(DmValue::Text(String::from_utf8_lossy(data).to_string()))
             }
         }
     }
