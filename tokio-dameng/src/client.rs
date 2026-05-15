@@ -942,28 +942,23 @@ impl Client {
         let stream = self.stream.as_mut().ok_or(Error::NotConnected)?;
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + 4096);
 
-        loop {
-            if buf.len() >= FRAME_HEADER_SIZE {
-                break;
-            }
-            let mut tmp = vec![0u8; 1024];
-            let n = stream.read(&mut tmp).await?;
+        // Read header using read_buf for zero-copy
+        while buf.len() < FRAME_HEADER_SIZE {
+            let n = stream.read_buf(&mut buf).await?;
             if n == 0 {
                 return Err(Error::ConnectionFailed("connection closed".to_string()));
             }
-            buf.extend_from_slice(&tmp[..n]);
         }
 
         let frame = Frame::parse(&mut buf)?;
 
+        // Read payload using read_buf
         let body_len = frame.body_len.max(0) as usize;
         while buf.len() < body_len {
-            let mut tmp = vec![0u8; 1024];
-            let n = stream.read(&mut tmp).await?;
+            let n = stream.read_buf(&mut buf).await?;
             if n == 0 {
                 return Err(Error::ConnectionFailed("connection closed during payload".to_string()));
             }
-            buf.extend_from_slice(&tmp[..n]);
         }
 
         let payload = buf[..body_len].to_vec();

@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use native_tls::{TlsConnector, TlsStream as NativeTlsStream};
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use dameng_protocol::frame::{Frame, FRAME_HEADER_SIZE};
 use dameng_protocol::message::*;
 use dameng_protocol::message::isolation::{IsolationLevel, SetIsolationMessage};
@@ -1288,16 +1288,16 @@ impl Client {
         let stream = self.stream.as_mut().ok_or(Error::NotConnected)?;
         let mut buf = BytesMut::with_capacity(FRAME_HEADER_SIZE + 4096);
 
-        // Read exactly FRAME_HEADER_SIZE bytes for the header.
-        // Reading more in one chunk would swallow the next message if both
-        // arrive in the same TCP packet (e.g. ACK + EXEC_RESPONSE after DML).
-        loop {
-            if buf.len() >= FRAME_HEADER_SIZE {
-                break;
-            }
-            let mut tmp = vec![0u8; FRAME_HEADER_SIZE];
+        // Read header using BytesMut chunk for zero-copy
+        while buf.len() < FRAME_HEADER_SIZE {
+            let needed = FRAME_HEADER_SIZE - buf.len();
+            buf.reserve(needed);
+            let chunk = buf.chunk_mut();
+            // SAFETY: we will write to these bytes, making them initialized
+            let dst = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) };
+            let cap = dst.len().min(needed);
             let n = loop {
-                match stream.read(&mut tmp) {
+                match stream.read(&mut dst[..cap]) {
                     Ok(n) => break n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1309,19 +1309,23 @@ impl Client {
             if n == 0 {
                 return Err(Error::ConnectionFailed("connection closed".to_string()));
             }
-            buf.extend_from_slice(&tmp[..n]);
+            // SAFETY: we just read n bytes into the chunk
+            unsafe { buf.advance_mut(n); }
         }
 
-        // Frame::parse consumes the header bytes from buf, leaving only payload
         let frame = Frame::parse(&mut buf)?;
 
-        // After Frame::parse(), the header bytes have been consumed from buf.
-        // buf now only contains any payload bytes that were read before parsing.
+        // Read payload using same zero-copy approach
         let body_len = frame.body_len.max(0) as usize;
         while buf.len() < body_len {
-            let mut tmp = vec![0u8; 1024];
+            let needed = body_len - buf.len();
+            buf.reserve(needed);
+            let chunk = buf.chunk_mut();
+            // SAFETY: we will write to these bytes, making them initialized
+            let dst = unsafe { std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len()) };
+            let cap = dst.len().min(needed);
             let n = loop {
-                match stream.read(&mut tmp) {
+                match stream.read(&mut dst[..cap]) {
                     Ok(n) => break n,
                     Err(e) if e.kind() == ErrorKind::WouldBlock || e.raw_os_error() == Some(35) => {
                         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -1335,11 +1339,10 @@ impl Client {
                     "connection closed during payload read".to_string(),
                 ));
             }
-            buf.extend_from_slice(&tmp[..n]);
+            unsafe { buf.advance_mut(n); }
         }
 
         let payload = buf[..body_len].to_vec();
-
         Ok((frame, payload))
     }
 
